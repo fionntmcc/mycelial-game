@@ -5,14 +5,15 @@ using System.Collections.Generic;
 using Mycorrhiza.Data;
 
 /// <summary>
-/// Player-controlled mycelium tendril with a compact 2x2 head,
-/// diagonal movement, and hunger system.
+/// Player-controlled mycelium tendril with a directional cone-shaped head,
+/// momentum-based movement, and hunger system.
 ///
-/// The tendril head uses a fixed 2x2 footprint.
+/// The tendril head uses a directional cone footprint.
 /// Tiles the tendril travels over settle to Mycelium (lightest)
 /// while the active head remains MyceliumCore.
 ///
-/// Movement: WASD for cardinal, diagonals by holding two keys.
+/// Movement: keyboard + controller left-stick.
+/// Movement has inertia: it accelerates with input and coasts briefly.
 /// Hunger drains per move, replenished by consuming organic tiles.
 /// At 0 hunger, auto-retreat along the trail back to the tree.
 /// </summary>
@@ -30,32 +31,69 @@ public partial class TendrilController : Node2D
 	// --- Movement Config ---
 	[Export] public float MoveDelay = 0.08f;
 	[Export] public float RetreatSpeed = 0.03f;
+	[Export] public float MomentumAcceleration = 8.0f;
+	[Export] public float MomentumSteering = 14.0f;
+	[Export] public float MomentumTurnAroundBrake = 10.0f;
+	[Export] public float MomentumReverseLockThreshold = -0.55f;
+	[Export] public float MomentumDrag = 3.2f;
+	[Export] public float MomentumDeadZone = 0.08f;
+	[Export] public float ControllerDeadZone = 0.22f;
+	[Export] public float MinMoveDelayMultiplier = 0.58f;
+	[Export] public float MaxMoveDelayMultiplier = 1.0f;
+	[Export] public float BlockedMomentumDamping = 0.45f;
 
 	// --- Root Spread Config ---
 	[Export] public bool EnableRootSpread = true;
-	[Export] public float RootSpreadInterval = 1.6f;
-	[Export] public float RootSpawnChanceOnDownMove = 0.20f;
-	[Export] public float RootBranchChance = 0.08f;
-	[Export] public int MaxActiveRoots = 8;
+	[Export] public float RootSpreadInterval = 0.9f;
+	[Export] public int RootGrowthStepsPerTick = 3;
+	[Export] public int RootSpawnEveryTiles = 15;
+	[Export] public int RootSpawnIntervalJitter = 2;
+	[Export] public int RootSpawnBurstMin = 2;
+	[Export] public int RootSpawnBurstMax = 4;
+	[Export] public float RootBranchChance = 0.18f;
+	[Export] public int MaxActiveRoots = 20;
 	[Export] public int RootMinLength = 8;
 	[Export] public int RootMaxLength = 22;
 
 	// --- Tip Shape ---
-	// Fixed 2x2 head footprint.
-	private static readonly (int dx, int dy)[] TipShapeBase = new[]
+	// Directional cone-shaped footprints.
+	private static readonly (int dx, int dy)[] TipShapeRight = new[]
 	{
-		(0, 0),
-		(1, 0),
-		(0, 1),
-		(1, 1),
+		(2, 1),
+		(1, 0), (1, 1), (1, 2),
 	};
 
-	// Root sprouts can emerge from edges and underside of the 2x2 head.
+	private static readonly (int dx, int dy)[] TipShapeLeft = new[]
+	{
+		(0, 1),
+		(1, 0), (1, 1), (1, 2),
+	};
+
+	private static readonly (int dx, int dy)[] TipShapeDown = new[]
+	{
+		(1, 2),
+		(0, 1), (1, 1), (2, 1),
+	};
+
+	private static readonly (int dx, int dy)[] TipShapeUp = new[]
+	{
+		(1, 0),
+		(0, 1), (1, 1), (2, 1),
+	};
+
+	private static readonly (int dx, int dy)[] TrailStampShape = new[]
+	{
+		(1, 0),
+		(0, 1), (1, 1), (2, 1),
+		(1, 2),
+	};
+
+	// Root sprouts can emerge from edges and underside of the head footprint.
 	private static readonly (int dx, int dy)[] RootSpawnOffsets = new[]
 	{
-		(-1, 0), (2, 0),
-		(-1, 1), (2, 1),
-		(0, 2), (1, 2),
+		(-1, 0), (-1, 1), (-1, 2),
+		(3, 0), (3, 1), (3, 2),
+		(0, 3), (1, 3), (2, 3),
 	};
 
 	private struct RootTip
@@ -89,10 +127,13 @@ public partial class TendrilController : Node2D
 	// Current tip tiles (for clearing when head moves)
 	private readonly List<(int X, int Y)> _currentTipTiles = new();
 
-	private float _moveTimer;
+	private Vector2 _moveAccumulator = Vector2.Zero;
+	private Vector2 _momentum = Vector2.Zero;
 	private float _retreatTimer;
 	private float _regenTimer;
 	private float _rootSpreadTimer;
+	private int _tilesSinceLastRootSpawn;
+	private int _nextRootSpawnDistance;
 	private List<(int X, int Y)> _rootTips;
 	private int _currentRootTipIdx;
 	private (int dx, int dy) _lastDirection = (0, 1); // Default facing down
@@ -138,7 +179,7 @@ public partial class TendrilController : Node2D
 		RegisterTreeTiles();
 		_currentRootTipIdx = 0;
 		SpawnAtRootTip(_currentRootTipIdx);
-		GD.Print($"Tendril spawned at ({HeadX}, {HeadY}). Tip size: {TipShapeBase.Length} tiles.");
+		GD.Print($"Tendril spawned at ({HeadX}, {HeadY}). Tip size: {TipShapeDown.Length} tiles.");
 	}
 
 	private void SpawnAtRootTip(int idx)
@@ -155,6 +196,8 @@ public partial class TendrilController : Node2D
 		_currentTipTiles.Clear();
 		_activeRootTips.Clear();
 		_rootSpreadTimer = 0f;
+		_tilesSinceLastRootSpawn = 0;
+		ScheduleNextRootSpawnDistance();
 
 		// Place initial tip
 		PlaceTip();
@@ -196,52 +239,182 @@ public partial class TendrilController : Node2D
 
 	private void ProcessMovement(float dt)
 	{
-		_moveTimer -= dt;
+		Vector2 input = GetMovementInputVector();
 
-		int dirX = 0, dirY = 0;
-
-		if (Input.IsKeyPressed(Key.W) || Input.IsKeyPressed(Key.Up))
-			dirY -= 1;
-		if (Input.IsKeyPressed(Key.S) || Input.IsKeyPressed(Key.Down))
-			dirY += 1;
-		if (Input.IsKeyPressed(Key.A) || Input.IsKeyPressed(Key.Left))
-			dirX -= 1;
-		if (Input.IsKeyPressed(Key.D) || Input.IsKeyPressed(Key.Right))
-			dirX += 1;
-
-		if (dirX == 0 && dirY == 0)
+		if (input != Vector2.Zero)
 		{
-			_moveTimer = 0;
+			Vector2 inputDir = input.Normalized();
+
+			if (_momentum == Vector2.Zero)
+			{
+				_momentum = _momentum.MoveToward(input, MomentumAcceleration * dt);
+			}
+			else
+			{
+				Vector2 momentumDir = _momentum.Normalized();
+				float alignment = momentumDir.Dot(inputDir);
+
+				if (alignment <= MomentumReverseLockThreshold)
+				{
+					// Turning directly around should feel heavy: brake first, then reverse.
+					_momentum = _momentum.MoveToward(Vector2.Zero, MomentumTurnAroundBrake * dt);
+
+					if (_momentum.Length() <= MomentumDeadZone * 1.25f)
+						_momentum = _momentum.MoveToward(input, MomentumAcceleration * dt);
+				}
+				else
+				{
+					float fromAngle = Mathf.Atan2(momentumDir.Y, momentumDir.X);
+					float toAngle = Mathf.Atan2(inputDir.Y, inputDir.X);
+					float steerT = Mathf.Clamp(MomentumSteering * dt, 0f, 1f);
+					float steeredAngle = Mathf.LerpAngle(fromAngle, toAngle, steerT);
+					Vector2 steeredDir = new Vector2(Mathf.Cos(steeredAngle), Mathf.Sin(steeredAngle));
+
+					float targetMagnitude = input.Length();
+					float nextMagnitude = Mathf.MoveToward(_momentum.Length(), targetMagnitude, MomentumAcceleration * dt);
+					_momentum = steeredDir * nextMagnitude;
+				}
+			}
+		}
+		else
+		{
+			_momentum = _momentum.MoveToward(Vector2.Zero, MomentumDrag * dt);
+		}
+
+		float speed = Mathf.Clamp(_momentum.Length(), 0f, 1f);
+		if (speed <= MomentumDeadZone)
+		{
+			if (input == Vector2.Zero)
+				_moveAccumulator = Vector2.Zero;
 			return;
 		}
 
-		if (_moveTimer > 0) return;
-		_moveTimer = MoveDelay;
+		float delayMultiplier = Mathf.Lerp(MaxMoveDelayMultiplier, MinMoveDelayMultiplier, speed);
+		// Guard against inspector misconfiguration (e.g., MoveDelay = 0) causing extreme movement speed.
+		float effectiveMoveDelay = Mathf.Max(0.06f, MoveDelay * delayMultiplier);
+		float stepsPerSecond = 1.0f / effectiveMoveDelay;
+		_moveAccumulator += _momentum * stepsPerSecond * dt;
 
-		int newX = HeadX + dirX;
-		int newY = HeadY + dirY;
+		int iterations = 0;
+		while ((Mathf.Abs(_moveAccumulator.X) >= 1f || Mathf.Abs(_moveAccumulator.Y) >= 1f) && iterations < 4)
+		{
+			iterations++;
 
-		// Update facing direction for tip shape
-		_lastDirection = (dirX, dirY);
+			int stepX = Mathf.Abs(_moveAccumulator.X) >= 1f ? System.Math.Sign(_moveAccumulator.X) : 0;
+			int stepY = Mathf.Abs(_moveAccumulator.Y) >= 1f ? System.Math.Sign(_moveAccumulator.Y) : 0;
 
-		TryMove(newX, newY);
+			bool moved = false;
+
+			if (stepX != 0 || stepY != 0)
+			{
+				_lastDirection = (stepX, stepY);
+				moved = TryMove(HeadX + stepX, HeadY + stepY);
+
+				if (moved)
+				{
+					_moveAccumulator.X -= stepX;
+					_moveAccumulator.Y -= stepY;
+					continue;
+				}
+			}
+
+			// If diagonal is blocked, try axis-separated movement for smoother glancing.
+			if (stepX != 0)
+			{
+				_lastDirection = (stepX, 0);
+				moved = TryMove(HeadX + stepX, HeadY);
+				if (moved)
+				{
+					_moveAccumulator.X -= stepX;
+					continue;
+				}
+			}
+
+			if (stepY != 0)
+			{
+				_lastDirection = (0, stepY);
+				moved = TryMove(HeadX, HeadY + stepY);
+				if (moved)
+				{
+					_moveAccumulator.Y -= stepY;
+					continue;
+				}
+			}
+
+			// Fully blocked: dampen accumulation and momentum to prevent sticky wall pushing.
+			_moveAccumulator *= 0.35f;
+			_momentum *= BlockedMomentumDamping;
+			break;
+		}
 	}
 
-	private void TryMove(int newX, int newY)
+	private Vector2 GetMovementInputVector()
+	{
+		int keyX = 0;
+		int keyY = 0;
+
+		if (Input.IsKeyPressed(Key.W) || Input.IsKeyPressed(Key.Up))
+			keyY -= 1;
+		if (Input.IsKeyPressed(Key.S) || Input.IsKeyPressed(Key.Down))
+			keyY += 1;
+		if (Input.IsKeyPressed(Key.A) || Input.IsKeyPressed(Key.Left))
+			keyX -= 1;
+		if (Input.IsKeyPressed(Key.D) || Input.IsKeyPressed(Key.Right))
+			keyX += 1;
+
+		Vector2 keyboard = new Vector2(keyX, keyY);
+		if (keyboard != Vector2.Zero)
+			keyboard = keyboard.Normalized();
+
+		Vector2 stick = Vector2.Zero;
+		var joypads = Input.GetConnectedJoypads();
+		if (joypads.Count > 0)
+		{
+			int joyId = joypads[0];
+			stick = new Vector2(
+				Input.GetJoyAxis(joyId, JoyAxis.LeftX),
+				Input.GetJoyAxis(joyId, JoyAxis.LeftY)
+			);
+
+			float len = stick.Length();
+			if (len < ControllerDeadZone)
+			{
+				stick = Vector2.Zero;
+			}
+			else if (len > 0f)
+			{
+				float normalizedLen = (len - ControllerDeadZone) / (1f - ControllerDeadZone);
+				normalizedLen = Mathf.Clamp(normalizedLen, 0f, 1f);
+				stick = stick.Normalized() * normalizedLen;
+			}
+		}
+
+		Vector2 combined = keyboard + stick;
+		if (combined.Length() > 1f)
+			combined = combined.Normalized();
+
+		return combined;
+	}
+
+	private bool TryMove(int newX, int newY)
 	{
 		// Check if the tip can fit at the new position
 		// Only need the center and immediate core to be passable
 		TileType centerTile = _chunkManager.GetTileAt(newX, newY);
 
+		// Tendrils cannot move through open air.
+		if (centerTile == TileType.Air)
+			return false;
+
 		// Can't move into unbreakable solids
 		if (TileProperties.Is(centerTile, TileFlags.Solid) && !TileProperties.Is(centerTile, TileFlags.Breakable))
-			return;
+			return false;
 
 		if (TileProperties.Is(centerTile, TileFlags.Liquid))
-			return;
+			return false;
 
 		if (TileProperties.Is(centerTile, TileFlags.Hazardous))
-			return;
+			return false;
 
 		// Calculate hunger cost
 		bool isOwnTerritory = _claimedTiles.Contains(PackCoords(newX, newY));
@@ -257,7 +430,7 @@ public partial class TendrilController : Node2D
 		if (Hunger - cost <= 0 && !isOwnTerritory)
 		{
 			StartRetreat();
-			return;
+			return false;
 		}
 
 		// Calculate hunger gain from ALL tiles the tip will consume
@@ -294,13 +467,15 @@ public partial class TendrilController : Node2D
 		// Update visuals: place new tip, update gradient trail
 		PlaceTip();
 		UpdateTrailGradient();
-		MaybeSpawnRootTipFromDownwardMove();
+		TrackTravelAndSpawnRoots();
 
 		EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
 		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
 
 		if (Hunger <= 0)
 			StartRetreat();
+
+		return true;
 	}
 
 	// --- Tip Placement ---
@@ -342,7 +517,24 @@ public partial class TendrilController : Node2D
 	/// </summary>
 	private static (int dx, int dy)[] GetTipShapeForDirection((int dx, int dy) dir)
 	{
-		return TipShapeBase;
+		dir = NormalizeDirection(dir);
+
+		if (dir.dx > 0 && dir.dy == 0) return TipShapeRight;
+		if (dir.dx < 0 && dir.dy == 0) return TipShapeLeft;
+		if (dir.dy > 0 && dir.dx == 0) return TipShapeDown;
+		if (dir.dy < 0 && dir.dx == 0) return TipShapeUp;
+		return TipShapeDown;
+	}
+
+	private static (int dx, int dy) NormalizeDirection((int dx, int dy) dir)
+	{
+		if (dir.dx == 0 && dir.dy == 0)
+			return (0, 1);
+
+		if (System.Math.Abs(dir.dx) >= System.Math.Abs(dir.dy))
+			return (System.Math.Sign(dir.dx), 0);
+
+		return (0, System.Math.Sign(dir.dy));
 	}
 
 	// --- Trail Gradient ---
@@ -357,7 +549,7 @@ public partial class TendrilController : Node2D
 			var (tx, ty, _) = _trail[i];
 
 			// Apply light mycelium to the tip footprint at this trail position.
-			foreach (var (dx, dy) in TipShapeBase)
+			foreach (var (dx, dy) in TrailStampShape)
 			{
 				int gx = tx + dx;
 				int gy = ty + dy;
@@ -387,21 +579,62 @@ public partial class TendrilController : Node2D
 
 	// --- Root Spread ---
 
-	private void MaybeSpawnRootTipFromDownwardMove()
+	private void TrackTravelAndSpawnRoots()
 	{
 		if (!EnableRootSpread) return;
 		if (_lastDirection.dy <= 0) return;
+
+		_tilesSinceLastRootSpawn++;
+		if (_tilesSinceLastRootSpawn < _nextRootSpawnDistance) return;
+
+		SpawnRootBurst();
+		_tilesSinceLastRootSpawn = 0;
+		ScheduleNextRootSpawnDistance();
+	}
+
+	private void ScheduleNextRootSpawnDistance()
+	{
+		int jitter = System.Math.Max(0, RootSpawnIntervalJitter);
+		int minDistance = System.Math.Max(1, RootSpawnEveryTiles - jitter);
+		int maxDistance = System.Math.Max(minDistance, RootSpawnEveryTiles + jitter);
+		_nextRootSpawnDistance = _rng.Next(minDistance, maxDistance + 1);
+	}
+
+	private void SpawnRootBurst()
+	{
 		if (_activeRootTips.Count >= MaxActiveRoots) return;
-		if (_rng.NextDouble() > RootSpawnChanceOnDownMove) return;
+
+		int burstMin = System.Math.Max(1, RootSpawnBurstMin);
+		int burstMax = System.Math.Max(burstMin, RootSpawnBurstMax);
+		int desiredCount = _rng.Next(burstMin, burstMax + 1);
+		int available = MaxActiveRoots - _activeRootTips.Count;
+		int spawnCount = System.Math.Min(desiredCount, available);
+		if (spawnCount <= 0) return;
+
+		int spawned = 0;
+		int attempts = 0;
+		int maxAttempts = spawnCount * 6;
+
+		while (spawned < spawnCount && attempts < maxAttempts)
+		{
+			attempts++;
+			if (TrySpawnSingleRootTip())
+				spawned++;
+		}
+	}
+
+	private bool TrySpawnSingleRootTip()
+	{
+		if (_activeRootTips.Count >= MaxActiveRoots) return false;
 
 		var offset = RootSpawnOffsets[_rng.Next(RootSpawnOffsets.Length)];
 		int startX = HeadX + offset.dx;
 		int startY = HeadY + offset.dy;
 
-		int dirX = offset.dx < 0 ? -1 : (offset.dx > 1 ? 1 : (_rng.Next(3) - 1));
+		int dirX = offset.dx < 0 ? -1 : (offset.dx > 2 ? 1 : (_rng.Next(3) - 1));
 		int dirY = 1;
 
-		if (!TrySpreadRootInto(startX, startY)) return;
+		if (!TrySpreadRootInto(startX, startY)) return false;
 
 		int maxLength = RootMinLength;
 		if (RootMaxLength > RootMinLength)
@@ -417,6 +650,8 @@ public partial class TendrilController : Node2D
 			MaxLength = maxLength,
 			StuckSteps = 0,
 		});
+
+		return true;
 	}
 
 	private void ProcessRootSpread(float dt)
@@ -426,6 +661,18 @@ public partial class TendrilController : Node2D
 		_rootSpreadTimer += dt;
 		if (_rootSpreadTimer < RootSpreadInterval) return;
 		_rootSpreadTimer -= RootSpreadInterval;
+
+		int steps = System.Math.Max(1, RootGrowthStepsPerTick);
+		for (int i = 0; i < steps; i++)
+		{
+			if (_activeRootTips.Count == 0) break;
+			GrowOneRootTipStep();
+		}
+	}
+
+	private void GrowOneRootTipStep()
+	{
+		if (_activeRootTips.Count == 0) return;
 
 		int idx = _rng.Next(_activeRootTips.Count);
 		var tip = _activeRootTips[idx];
@@ -567,8 +814,8 @@ public partial class TendrilController : Node2D
 		foreach (var (tx, ty) in _currentTipTiles)
 		{
 			long key = PackCoords(tx, ty);
-			_claimedTiles.Remove(key);
-			_chunkManager.SetTileAt(tx, ty, TileType.Air);
+			// _claimedTiles.Remove(key);
+			 _chunkManager.SetTileAt(tx, ty, TileType.Mycelium);
 		}
 
 		// Move head back along trail
@@ -579,7 +826,7 @@ public partial class TendrilController : Node2D
 
 		// Place tip at new position (so you can see the retreat)
 		_currentTipTiles.Clear();
-		foreach (var (dx, dy) in TipShapeBase)
+		foreach (var (dx, dy) in GetTipShapeForDirection(_lastDirection))
 		{
 			int gx = HeadX + dx;
 			int gy = HeadY + dy;

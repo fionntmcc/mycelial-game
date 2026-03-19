@@ -30,75 +30,75 @@ public partial class ChunkRenderer : Node2D
 		_data = data;
 
 		// Position node at the chunk's world pixel coordinates
-        Position = new Vector2(_data.WorldPixelX, _data.WorldPixelY);
+		Position = new Vector2(_data.WorldPixelX, _data.WorldPixelY);
 
-        // Create the TileMapLayer for rendering
-        _tileMapLayer = new TileMapLayer();
-        _tileMapLayer.TileSet = tileSet;
-        _tileMapLayer.TextureFilter = CanvasItem.TextureFilterEnum.Nearest;
-        _tileMapLayer.Name = $"ChunkTiles_{_data.ChunkX}_{_data.ChunkY}";
-        AddChild(_tileMapLayer);
+		// Create the TileMapLayer for rendering
+		_tileMapLayer = new TileMapLayer();
+		_tileMapLayer.TileSet = tileSet;
+		_tileMapLayer.TextureFilter = CanvasItem.TextureFilterEnum.Nearest;
+		_tileMapLayer.Name = $"ChunkTiles_{_data.ChunkX}_{_data.ChunkY}";
+		AddChild(_tileMapLayer);
 
-        // Initial render
-        ApplyAllTiles();
-    }
+		// Initial render
+		ApplyAllTiles();
+	}
 
-    /// <summary>
-    /// Apply all tile data from ChunkData to the TileMapLayer.
-    /// Called on initial load and whenever the chunk is marked dirty.
-    /// </summary>
-    public void ApplyAllTiles()
-    {
-        if (_data == null || _tileMapLayer == null) return;
+	/// <summary>
+	/// Apply all tile data from ChunkData to the TileMapLayer.
+	/// Called on initial load and whenever the chunk is marked dirty.
+	/// </summary>
+	public void ApplyAllTiles()
+	{
+		if (_data == null || _tileMapLayer == null) return;
 
-        for (int ly = 0; ly < WorldConfig.ChunkSize; ly++)
-        {
-            for (int lx = 0; lx < WorldConfig.ChunkSize; lx++)
-            {
-                TileType tile = _data.GetTile(lx, ly);
-                ApplyTile(lx, ly, tile);
-            }
-        }
+		for (int ly = 0; ly < WorldConfig.ChunkSize; ly++)
+		{
+			for (int lx = 0; lx < WorldConfig.ChunkSize; lx++)
+			{
+				TileType tile = _data.GetTile(lx, ly);
+				ApplyTile(lx, ly, tile);
+			}
+		}
 
-        _data.IsDirty = false;
-    }
+		_data.IsDirty = false;
+	}
 
-    /// <summary>
-    /// Update only tiles that have changed since last render.
-    /// More efficient than ApplyAllTiles for runtime modifications
-    /// (e.g., mycelium spreading, tiles being mined).
-    /// 
-    /// For now, falls back to ApplyAllTiles. A proper implementation
-    /// would track a dirty list of individual tile positions.
-    /// TODO: Implement per-tile dirty tracking for runtime updates.
-    /// </summary>
-    public void ApplyDirtyTiles()
-    {
-        if (_data == null || !_data.IsDirty) return;
-        ApplyAllTiles(); // Fallback — replace with granular update later
-    }
+	/// <summary>
+	/// Update only tiles that have changed since last render.
+	/// More efficient than ApplyAllTiles for runtime modifications
+	/// (e.g., mycelium spreading, tiles being mined).
+	/// 
+	/// For now, falls back to ApplyAllTiles. A proper implementation
+	/// would track a dirty list of individual tile positions.
+	/// TODO: Implement per-tile dirty tracking for runtime updates.
+	/// </summary>
+	public void ApplyDirtyTiles()
+	{
+		if (_data == null || !_data.IsDirty) return;
+		ApplyAllTiles(); // Fallback — replace with granular update later
+	}
 
-    /// <summary>
-    /// Set a single tile in the TileMapLayer.
-    /// Maps TileType to the appropriate atlas coordinates in the TileSet.
-    /// </summary>
-    private void ApplyTile(int lx, int ly, TileType tile)
-    {
-        if (tile == TileType.Air)
-        {
-            // Clear the cell — Air = no tile rendered
-            _tileMapLayer.EraseCell(new Vector2I(lx, ly));
-            return;
-        }
+	/// <summary>
+	/// Set a single tile in the TileMapLayer.
+	/// Maps TileType to the appropriate atlas coordinates in the TileSet.
+	/// </summary>
+	private void ApplyTile(int lx, int ly, TileType tile)
+	{
+		if (tile == TileType.Air)
+		{
+			// Clear the cell — Air = no tile rendered
+			_tileMapLayer.EraseCell(new Vector2I(lx, ly));
+			return;
+		}
 
-        // Map TileType to TileSet atlas coordinates.
-        // The TileSet should be set up as an atlas where each tile type
-        // occupies a specific position. For a simple prototype:
-        //   - Source ID 0 = main atlas
-        //   - Atlas coords = (tileTypeValue % atlasColumns, tileTypeValue / atlasColumns)
-        //
-        // For the prototype, we use a simple mapping where the TileType
-        // integer value directly maps to a position in the atlas.
+		// Map TileType to TileSet atlas coordinates.
+		// The TileSet should be set up as an atlas where each tile type
+		// occupies a specific position. For a simple prototype:
+		//   - Source ID 0 = main atlas
+		//   - Atlas coords = (tileTypeValue % atlasColumns, tileTypeValue / atlasColumns)
+		//
+		// For the prototype, we use a simple mapping where the TileType
+		// integer value directly maps to a position in the atlas.
 		// You'll customize this when you create your actual tileset art.
 
 		int atlasColumns = 16; // Tiles per row in your atlas texture

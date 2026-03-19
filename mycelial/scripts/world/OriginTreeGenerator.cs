@@ -24,32 +24,32 @@ using Mycorrhiza.Data;
 /// </summary>
 public class OriginTreeGenerator
 {
-    /// <summary>Represents a single point in the root network.</summary>
-    private struct RootSegment
-    {
-        public int X;
-        public int Y;
-        public TileType TileType;
-        public int Thickness; // Radius in tiles (for thick roots)
-    }
+	/// <summary>Represents a single point in the root network.</summary>
+	private struct RootSegment
+	{
+		public int X;
+		public int Y;
+		public TileType TileType;
+		public int Thickness; // Radius in tiles (for thick roots)
+	}
 
-    // Pre-computed root segments (generated once, stamped per chunk)
-    private readonly List<RootSegment> _rootSegments = new();
-    private readonly List<RootSegment> _trunkSegments = new();
-    private readonly List<RootSegment> _canopySegments = new();
+	// Pre-computed root segments (generated once, stamped per chunk)
+	private readonly List<RootSegment> _rootSegments = new();
+	private readonly List<RootSegment> _trunkSegments = new();
+	private readonly List<RootSegment> _canopySegments = new();
 
-    /// <summary>World-space positions of all root tips — where mycelium begins spreading.</summary>
-    public List<(int X, int Y)> RootTipPositions { get; } = new();
+	/// <summary>World-space positions of all root tips — where mycelium begins spreading.</summary>
+	public List<(int X, int Y)> RootTipPositions { get; } = new();
 
-    // Bounding box for quick chunk overlap test
-    private int _minX, _maxX, _minY, _maxY;
+	// Bounding box for quick chunk overlap test
+	private int _minX, _maxX, _minY, _maxY;
 
-    private readonly int _treeBaseX;
-    private readonly Random _rng;
+	private readonly int _treeBaseX;
+	private readonly Random _rng;
 
-    public OriginTreeGenerator(int seed)
-    {
-        _treeBaseX = WorldConfig.TreeWorldX;
+	public OriginTreeGenerator(int seed)
+	{
+		_treeBaseX = WorldConfig.TreeWorldX;
 		_rng = new Random(seed + 9999); // Offset seed so tree doesn't correlate with terrain
 
 		GenerateTrunk();
@@ -106,14 +106,45 @@ public class OriginTreeGenerator
 		int originX = chunk.WorldTileX;
 		int originY = chunk.WorldTileY;
 
+		// === NEW: Fill dirt around roots first, so no air pockets remain ===
+		StampDirtBuffer(_rootSegments, chunk, originX, originY, padding: 2);
+
 		// Stamp trunk
 		StampSegments(_trunkSegments, chunk, originX, originY);
 
-		// Stamp roots (before canopy so roots render behind)
+		// Stamp roots
 		StampSegments(_rootSegments, chunk, originX, originY);
 
-		// Stamp canopy last (on top)
+		// Stamp canopy last
 		StampSegments(_canopySegments, chunk, originX, originY);
+	}
+
+	private void StampDirtBuffer(List<RootSegment> segments, ChunkData chunk, int originX, int originY, int padding)
+	{
+		foreach (var seg in segments)
+		{
+			int radius = seg.Thickness + padding;
+			for (int dy = -radius; dy <= radius; dy++)
+			{
+				for (int dx = -radius; dx <= radius; dx++)
+				{
+					if (dx * dx + dy * dy <= radius * radius)
+					{
+						int lx = seg.X + dx - originX;
+						int ly = seg.Y + dy - originY;
+						if (ChunkData.InBounds(lx, ly))
+						{
+							TileType existing = chunk.GetTile(lx, ly);
+							// Only fill air — don't overwrite stone, ore, etc.
+							if (existing == TileType.Air)
+							{
+								chunk.SetTile(lx, ly, TileType.Dirt);
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	private void StampSegments(List<RootSegment> segments, ChunkData chunk, int originX, int originY)
@@ -353,77 +384,77 @@ public class OriginTreeGenerator
 		for (int step = 0; step < segmentLength; step++)
 		{
 			// Stop if we've gone too deep
-            if (y > WorldConfig.TreeRootDepth) break;
+			if (y > WorldConfig.TreeRootDepth) break;
 
-            // Place root segment
-            _rootSegments.Add(new RootSegment
-            {
-                X = (int)x,
-                Y = (int)y,
-                TileType = tileType,
-                Thickness = thickness
-            });
+			// Place root segment
+			_rootSegments.Add(new RootSegment
+			{
+				X = (int)x,
+				Y = (int)y,
+				TileType = tileType,
+				Thickness = thickness
+			});
 
-            // Advance position with drift and randomness
-            x += dirX + (_rng.NextSingle() - 0.5f) * 0.8f;
-            y += dirY + _rng.NextSingle() * 0.3f;
+			// Advance position with drift and randomness
+			x += dirX + (_rng.NextSingle() - 0.5f) * 0.8f;
+			y += dirY + _rng.NextSingle() * 0.3f;
 
-            // Roots tend to drift more horizontal as they grow (seeking)
-            dirX += (_rng.NextSingle() - 0.5f) * 0.15f;
-            dirX = Math.Clamp(dirX, -1.5f, 1.5f);
+			// Roots tend to drift more horizontal as they grow (seeking)
+			dirX += (_rng.NextSingle() - 0.5f) * 0.15f;
+			dirX = Math.Clamp(dirX, -1.5f, 1.5f);
 
-            // Occasionally wobble direction for organic feel
-            if (_rng.Next(6) == 0)
-                dirX = -dirX * 0.5f;
+			// Occasionally wobble direction for organic feel
+			if (_rng.Next(6) == 0)
+				dirX = -dirX * 0.5f;
 
-            // Sub-branch at random intervals
-            if (step > 5 && _rng.Next(8) == 0 && depth < 4)
-            {
-                // Branch in a different direction
-                float branchDirX = dirX + (_rng.NextSingle() - 0.5f) * 2.0f;
-                float branchDirY = dirY + _rng.NextSingle() * 0.3f;
+			// Sub-branch at random intervals
+			if (step > 5 && _rng.Next(8) == 0 && depth < 4)
+			{
+				// Branch in a different direction
+				float branchDirX = dirX + (_rng.NextSingle() - 0.5f) * 2.0f;
+				float branchDirY = dirY + _rng.NextSingle() * 0.3f;
 
-                // Thinner tile type for sub-branches
-                TileType subType = GetThinnerRoot(tileType);
-                int subThickness = Math.Max(1, thickness - 1);
+				// Thinner tile type for sub-branches
+				TileType subType = GetThinnerRoot(tileType);
+				int subThickness = Math.Max(1, thickness - 1);
 
-                GrowRoot(x, y, branchDirX, branchDirY, subType, subThickness, depth + 1);
-            }
-        }
+				GrowRoot(x, y, branchDirX, branchDirY, subType, subThickness, depth + 1);
+			}
+		}
 
-        // Place root tip at the end (where mycelium starts)
-        TileType tipType = (depth >= 2) ? TileType.RootTip : GetThinnerRoot(tileType);
+		// Place root tip at the end (where mycelium starts)
+		TileType tipType = (depth >= 2) ? TileType.RootTip : GetThinnerRoot(tileType);
 
-        // Fan out a few thin roots at the tip
-        if (depth < 3)
-        {
-            for (int i = 0; i < 2 + _rng.Next(3); i++)
-            {
-                float tipDirX = dirX + (_rng.NextSingle() - 0.5f) * 2.0f;
-                float tipDirY = dirY + _rng.NextSingle() * 0.5f;
-                TileType fanType = GetThinnerRoot(tipType);
-                GrowRoot(x, y, tipDirX, tipDirY, fanType, 1, depth + 2);
-            }
-        }
+		// Fan out a few thin roots at the tip
+		if (depth < 3)
+		{
+			for (int i = 0; i < 2 + _rng.Next(3); i++)
+			{
+				float tipDirX = dirX + (_rng.NextSingle() - 0.5f) * 2.0f;
+				float tipDirY = dirY + _rng.NextSingle() * 0.5f;
+				TileType fanType = GetThinnerRoot(tipType);
+				GrowRoot(x, y, tipDirX, tipDirY, fanType, 1, depth + 2);
+			}
+		}
 
-        // Final root tip marker
-        _rootSegments.Add(new RootSegment
-        {
-            X = (int)x,
-            Y = (int)y,
-            TileType = TileType.RootTip,
-            Thickness = 1
-        });
-        RootTipPositions.Add(((int)x, (int)y));
-    }
+		// Final root tip marker
+		_rootSegments.Add(new RootSegment
+		{
+			X = (int)x,
+			Y = (int)y,
+			TileType = TileType.RootTip,
+			Thickness = 1
+		});
+		RootTipPositions.Add(((int)x, (int)y));
+	}
 
-    /// <summary>Get the next thinner root type.</summary>
-    private static TileType GetThinnerRoot(TileType current)
-    {
-        return current switch
-        {
-            TileType.Roots => TileType.Roots,
-            _ => TileType.RootTip
-        };
-    }
+	/// <summary>Get the next thinner root type.</summary>
+	private static TileType GetThinnerRoot(TileType current)
+	{
+		return current switch
+		{
+			TileType.Roots => TileType.Roots,
+			_ => TileType.RootTip
+		};
+	}
 }

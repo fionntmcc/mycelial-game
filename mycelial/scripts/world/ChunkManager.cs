@@ -84,57 +84,57 @@ public partial class ChunkManager : Node2D
 		var visibleRange = GetVisibleChunkRange();
 
 		// 2. Request generation for chunks that aren't loaded or pending
-        RequestMissingChunks(visibleRange);
+		RequestMissingChunks(visibleRange);
 
-        // 3. Process completed chunks from the background thread
-        ProcessReadyChunks();
+		// 3. Process completed chunks from the background thread
+		ProcessReadyChunks();
 
-        // 4. Unload chunks that are too far from the camera
-        UnloadDistantChunks(visibleRange);
+		// 4. Unload chunks that are too far from the camera
+		UnloadDistantChunks(visibleRange);
 
-        // 5. Update dirty chunks (runtime tile changes like mycelium spread)
-        UpdateDirtyChunks();
-    }
+		// 5. Update dirty chunks (runtime tile changes like mycelium spread)
+		UpdateDirtyChunks();
+	}
 
-    public override void _ExitTree()
-    {
-        _cts?.Cancel();
-        _cts?.Dispose();
-    }
+	public override void _ExitTree()
+	{
+		_cts?.Cancel();
+		_cts?.Dispose();
+	}
 
-    // --- Core Logic ---
+	// --- Core Logic ---
 
-    /// <summary>
-    /// Calculate the range of chunks that should be loaded, based on camera viewport.
-    /// Returns (minChunkX, minChunkY, maxChunkX, maxChunkY) inclusive.
-    /// </summary>
-    private (int minX, int minY, int maxX, int maxY) GetVisibleChunkRange()
-    {
-        // Get the viewport size in pixels
-        Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
-        Vector2 cameraPos = _camera.GlobalPosition;
-        float zoom = _camera.Zoom.X; // Assuming uniform zoom
+	/// <summary>
+	/// Calculate the range of chunks that should be loaded, based on camera viewport.
+	/// Returns (minChunkX, minChunkY, maxChunkX, maxChunkY) inclusive.
+	/// </summary>
+	private (int minX, int minY, int maxX, int maxY) GetVisibleChunkRange()
+	{
+		// Get the viewport size in pixels
+		Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
+		Vector2 cameraPos = _camera.GlobalPosition;
+		float zoom = _camera.Zoom.X; // Assuming uniform zoom
 
-        // Calculate visible world area in pixels
-        float halfWidth = (viewportSize.X / zoom) / 2.0f;
-        float halfHeight = (viewportSize.Y / zoom) / 2.0f;
+		// Calculate visible world area in pixels
+		float halfWidth = (viewportSize.X / zoom) / 2.0f;
+		float halfHeight = (viewportSize.Y / zoom) / 2.0f;
 
-        // Convert to chunk coordinates with load radius padding
-        int minCX = WorldToChunkX(cameraPos.X - halfWidth) - WorldConfig.LoadRadiusChunks;
-        int minCY = WorldToChunkY(cameraPos.Y - halfHeight) - WorldConfig.LoadRadiusChunks;
-        int maxCX = WorldToChunkX(cameraPos.X + halfWidth) + WorldConfig.LoadRadiusChunks;
-        int maxCY = WorldToChunkY(cameraPos.Y + halfHeight) + WorldConfig.LoadRadiusChunks;
+		// Convert to chunk coordinates with load radius padding
+		int minCX = WorldToChunkX(cameraPos.X - halfWidth) - WorldConfig.LoadRadiusChunks;
+		int minCY = WorldToChunkY(cameraPos.Y - halfHeight) - WorldConfig.LoadRadiusChunks;
+		int maxCX = WorldToChunkX(cameraPos.X + halfWidth) + WorldConfig.LoadRadiusChunks;
+		int maxCY = WorldToChunkY(cameraPos.Y + halfHeight) + WorldConfig.LoadRadiusChunks;
 
-        // Clamp to world bounds
-        minCX = System.Math.Max(0, minCX);
-        minCY = System.Math.Max(-1, minCY); // Allow one row above surface for sky
-        maxCX = System.Math.Min(WorldConfig.WorldWidthChunks - 1, maxCX);
-        maxCY = System.Math.Min(WorldConfig.WorldDepthChunks - 1, maxCY);
+		// Clamp to world bounds
+		minCX = System.Math.Max(0, minCX);
+		minCY = System.Math.Max(-1, minCY); // Allow one row above surface for sky
+		maxCX = System.Math.Min(WorldConfig.WorldWidthChunks - 1, maxCX);
+		maxCY = System.Math.Min(WorldConfig.WorldDepthChunks - 1, maxCY);
 
-        return (minCX, minCY, maxCX, maxCY);
-    }
+		return (minCX, minCY, maxCX, maxCY);
+	}
 
-    /// <summary>
+	/// <summary>
 	/// For each chunk in the visible range that isn't loaded or pending, dispatch generation.
 	/// </summary>
 	private void RequestMissingChunks((int minX, int minY, int maxX, int maxY) range)
@@ -189,34 +189,34 @@ public partial class ChunkManager : Node2D
 			_pendingGeneration.Remove(key);
 
 			// Don't create renderer if chunk is already loaded (race condition guard)
-            if (_loadedChunks.ContainsKey(key))
-                continue;
+			if (_loadedChunks.ContainsKey(key))
+				continue;
 
-            // Cache the data
-            _chunkCache[key] = data;
+			// Cache the data
+			_chunkCache[key] = data;
 
-            // Create renderer node
-            var renderer = new ChunkRenderer();
-            renderer.Name = $"Chunk_{data.ChunkX}_{data.ChunkY}";
-            AddChild(renderer);
-            renderer.Initialize(data, TileSetResource);
+			// Create renderer node
+			var renderer = new ChunkRenderer();
+			renderer.Name = $"Chunk_{data.ChunkX}_{data.ChunkY}";
+			AddChild(renderer);
+			renderer.Initialize(data, TileSetResource);
 
-            _loadedChunks[key] = renderer;
-            processed++;
-        }
-    }
+			_loadedChunks[key] = renderer;
+			processed++;
+		}
+	}
 
-    /// <summary>
-    /// Free ChunkRenderer nodes for chunks that are outside the unload radius.
-    /// The ChunkData is kept in cache for quick reload.
-    /// </summary>
-    private void UnloadDistantChunks((int minX, int minY, int maxX, int maxY) visibleRange)
-    {
-        // Expand visible range by unload buffer to get the keep-alive zone
-        int keepMinX = visibleRange.minX - WorldConfig.UnloadRadiusChunks;
-        int keepMinY = visibleRange.minY - WorldConfig.UnloadRadiusChunks;
-        int keepMaxX = visibleRange.maxX + WorldConfig.UnloadRadiusChunks;
-        int keepMaxY = visibleRange.maxY + WorldConfig.UnloadRadiusChunks;
+	/// <summary>
+	/// Free ChunkRenderer nodes for chunks that are outside the unload radius.
+	/// The ChunkData is kept in cache for quick reload.
+	/// </summary>
+	private void UnloadDistantChunks((int minX, int minY, int maxX, int maxY) visibleRange)
+	{
+		// Expand visible range by unload buffer to get the keep-alive zone
+		int keepMinX = visibleRange.minX - WorldConfig.UnloadRadiusChunks;
+		int keepMinY = visibleRange.minY - WorldConfig.UnloadRadiusChunks;
+		int keepMaxX = visibleRange.maxX + WorldConfig.UnloadRadiusChunks;
+		int keepMaxY = visibleRange.maxY + WorldConfig.UnloadRadiusChunks;
 
 		// Collect keys to remove (can't modify dict during iteration)
 		var toRemove = new List<long>();
@@ -244,75 +244,75 @@ public partial class ChunkManager : Node2D
 
 		// Optional: Evict very old cache entries to save memory
 		// For now, we keep everything. For a large world you'd want an LRU cache.
-    }
+	}
 
-    /// <summary>
-    /// Re-render chunks whose data has been modified at runtime.
-    /// This handles mycelium growth, mining, infection spreading, etc.
-    /// </summary>
-    private void UpdateDirtyChunks()
-    {
-        foreach (var (_, renderer) in _loadedChunks)
-        {
-            renderer.ApplyDirtyTiles();
-        }
-    }
+	/// <summary>
+	/// Re-render chunks whose data has been modified at runtime.
+	/// This handles mycelium growth, mining, infection spreading, etc.
+	/// </summary>
+	private void UpdateDirtyChunks()
+	{
+		foreach (var (_, renderer) in _loadedChunks)
+		{
+			renderer.ApplyDirtyTiles();
+		}
+	}
 
-    // --- Public API (for other systems to interact with the world) ---
+	// --- Public API (for other systems to interact with the world) ---
 
-    /// <summary>
-    /// Get the tile at a world tile coordinate. Returns Air if chunk not loaded.
-    /// </summary>
-    public TileType GetTileAt(int worldTileX, int worldTileY)
-    {
-        var (cx, cy, lx, ly) = ChunkData.WorldToLocal(worldTileX, worldTileY);
-        long key = PackCoords(cx, cy);
+	/// <summary>
+	/// Get the tile at a world tile coordinate. Returns Air if chunk not loaded.
+	/// </summary>
+	public TileType GetTileAt(int worldTileX, int worldTileY)
+	{
+		var (cx, cy, lx, ly) = ChunkData.WorldToLocal(worldTileX, worldTileY);
+		long key = PackCoords(cx, cy);
 
-        if (_chunkCache.TryGetValue(key, out ChunkData data))
-            return data.GetTile(lx, ly);
+		if (_chunkCache.TryGetValue(key, out ChunkData data))
+			return data.GetTile(lx, ly);
 
-        return TileType.Air; // Unloaded chunks treated as air
-    }
+		return TileType.Air; // Unloaded chunks treated as air
+	}
 
-    /// <summary>
-    /// Set a tile at a world tile coordinate.
-    /// If the chunk is loaded (has a renderer), the visual updates immediately.
-    /// If the chunk is only cached, the data updates and will render when reloaded.
-    /// </summary>
-    public void SetTileAt(int worldTileX, int worldTileY, TileType type)
-    {
-        var (cx, cy, lx, ly) = ChunkData.WorldToLocal(worldTileX, worldTileY);
-        long key = PackCoords(cx, cy);
+	/// <summary>
+	/// Set a tile at a world tile coordinate.
+	/// If the chunk is loaded (has a renderer), the visual updates immediately.
+	/// If the chunk is only cached, the data updates and will render when reloaded.
+	/// </summary>
+	public void SetTileAt(int worldTileX, int worldTileY, TileType type)
+	{
+		var (cx, cy, lx, ly) = ChunkData.WorldToLocal(worldTileX, worldTileY);
+		long key = PackCoords(cx, cy);
 
-        // Update renderer directly if chunk is visible
-        if (_loadedChunks.TryGetValue(key, out ChunkRenderer renderer))
-        {
-            renderer.SetTileAt(lx, ly, type);
-            return;
-        }
+		// Update renderer directly if chunk is visible
+		if (_loadedChunks.TryGetValue(key, out ChunkRenderer renderer))
+		{
+			renderer.SetTileAt(lx, ly, type);
+			return;
+		}
 
-        // Otherwise update cached data
-        if (_chunkCache.TryGetValue(key, out ChunkData data))
-        {
-            data.SetTile(lx, ly, type);
-        }
-    }
+		// Otherwise update cached data
+		if (_chunkCache.TryGetValue(key, out ChunkData data))
+		{
+			data.SetTile(lx, ly, type);
+		}
+	}
 
-    /// <summary>
-    /// Get the biome at a world tile coordinate.
-    /// </summary>
-    public BiomeType GetBiomeAt(int worldTileX, int worldTileY)
-    {
-        if (worldTileY < 0) return BiomeType.Sky;
-        return _noise.GetBiomeAt(worldTileX, worldTileY).Type;
-    }
+	/// <summary>
+	/// Get the biome at a world tile coordinate.
+	/// </summary>
+	public BiomeType GetBiomeAt(int worldTileX, int worldTileY)
+	{
+		if (worldTileY < 0) return BiomeType.Sky;
+		return _noise.GetBiomeAt(worldTileX, worldTileY).Type;
+	}
 
-    /// <summary>
-    /// Get the world seed (useful for saving/loading).
-    /// </summary>
-    public int GetWorldSeed() => _noise?.Seed ?? 0;
+	/// <summary>
+	/// Get the world seed (useful for saving/loading).
+	/// </summary>
+	public int GetWorldSeed() => _noise?.Seed ?? 0;
 
-    /// <summary>
+	/// <summary>
 	/// Get the origin tree's root tip positions (where mycelium starts).
 	/// </summary>
 	public System.Collections.Generic.List<(int X, int Y)> GetRootTipPositions()
