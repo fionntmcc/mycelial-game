@@ -1,4 +1,4 @@
-# Mycorrhiza
+# Mycelial
 
 A top-down atmospheric horror roguelite where you play as a sentient fungal network spreading through a dying forest.
 
