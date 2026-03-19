@@ -1,0 +1,41 @@
+[gd_scene format=3 uid="uid://dd6t1jo6uh5aq"]
+
+[ext_resource type="Script" uid="uid://b8oae0y27r0t0" path="res://scripts/world/TendrilCamera.cs" id="1_71j4m"]
+[ext_resource type="Script" uid="uid://dn575dnhxw4xh" path="res://scripts/world/ChunkManager.cs" id="2_k0juu"]
+[ext_resource type="TileSet" uid="uid://do14mhd2uo3fp" path="res://tileset.tres" id="3_71j4m"]
+[ext_resource type="Script" uid="uid://btiucbu7q5328" path="res://scripts/world/TendrilHUD.cs" id="4_i7141"]
+[ext_resource type="Script" uid="uid://dh8vhgtw0l0s3" path="res://scripts/world/MyceliumSystem.cs" id="4_k0juu"]
+[ext_resource type="Script" uid="uid://b2v0cs105gaop" path="res://scripts/world/TendrilController.cs" id="5_qfnet"]
+[ext_resource type="Script" uid="uid://dxnlmlkid3lvv" path="res://scripts/world/PassiveCorruption.cs" id="7_4mrxx"]
+
+[node name="World" type="Node2D" unique_id=185312821]
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=1324047441]
+script = ExtResource("1_71j4m")
+TendrilControllerPath = NodePath("../TendrilController")
+
+[node name="ChunkManager" type="Node2D" parent="." unique_id=23384488]
+script = ExtResource("2_k0juu")
+CameraPath = NodePath("../Camera2D")
+TileSetResource = ExtResource("3_71j4m")
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=426077501]
+script = ExtResource("4_i7141")
+TendrilControllerPath = NodePath("../TendrilController")
+
+[node name="MyceliumSystem" type="Node2D" parent="." unique_id=303412309]
+script = ExtResource("4_k0juu")
+ChunkManagerPath = NodePath("../ChunkManager")
+
+[node name="TendrilController" type="Node2D" parent="." unique_id=1420415883]
+script = ExtResource("5_qfnet")
+ChunkManagerPath = NodePath("../ChunkManager")
+HungerPerMove = 10.0
+HungerPerHardMove = 15.0
+HungerOnCorrupted = 3.0
+HungerRegenOnCorrupted = 4.0
+
+[node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
+script = ExtResource("7_4mrxx")
+ChunkManagerPath = NodePath("../ChunkManager")
+TendrilControllerPath = NodePath("../TendrilController")

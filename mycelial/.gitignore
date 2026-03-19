@@ -1,0 +1,31 @@
+# Godot 4+ .gitignore
+
+# Godot-specific ignores
+.godot/
+
+# Mono/C# build artifacts
+.mono/
+*.x86_64
+*.pck
+
+# .NET build output
+bin/
+obj/
+
+# Godot export presets (optional — some teams track this)
+# export_presets.cfg
+
+# IDE files
+.vs/
+.vscode/
+*.sln.DotSettings.user
+*.user
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build/export output
+builds/
+export/
