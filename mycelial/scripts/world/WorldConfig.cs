@@ -39,8 +39,9 @@ public static class WorldConfig
 	// --- Generation Noise Parameters ---
 	public const int TerrainSeed = 0;         // 0 = random seed each run
 	public const float TerrainFrequency = 0.02f;
-	public const float CaveFrequency = 0.05f;
-	public const float CaveThreshold = 0.0f;  // Values above this = open air
+	public const float CaveFrequency = 0.03f;
+	public const float CaveThreshold = 0.36f;  // Higher = rarer caves
+	public const int CaveMinDepth = 30;        // No caves above this depth
 	public const float BiomeBoundaryNoise = 0.01f; // Frequency for biome edge wobble
 	public const int BiomeBoundaryWobble = 15; // Max tile offset for biome transitions
 

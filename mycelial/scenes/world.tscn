@@ -7,6 +7,7 @@
 [ext_resource type="Script" uid="uid://dh8vhgtw0l0s3" path="res://scripts/world/MyceliumSystem.cs" id="4_k0juu"]
 [ext_resource type="Script" uid="uid://b2v0cs105gaop" path="res://scripts/world/TendrilController.cs" id="5_qfnet"]
 [ext_resource type="Script" uid="uid://dxnlmlkid3lvv" path="res://scripts/world/PassiveCorruption.cs" id="7_4mrxx"]
+[ext_resource type="Script" uid="uid://62mqlvkcqfkw" path="res://scripts/world/CreatureManager.cs" id="8_4mrxx"]
 
 [node name="World" type="Node2D" unique_id=185312821]
 
@@ -37,5 +38,15 @@ HungerRegenOnCorrupted = 4.0
 
 [node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
 script = ExtResource("7_4mrxx")
+ChunkManagerPath = NodePath("../ChunkManager")
+TendrilControllerPath = NodePath("../TendrilController")
+
+[node name="CreatureManager" type="Node2D" parent="." unique_id=83747499]
+script = ExtResource("8_4mrxx")
+ChunkManagerPath = NodePath("../ChunkManager")
+TendrilControllerPath = NodePath("../TendrilController")
+
+[node name="CreatureManager" type="Node2D" parent="CreatureManager" unique_id=1653449213]
+script = ExtResource("8_4mrxx")
 ChunkManagerPath = NodePath("../ChunkManager")
 TendrilControllerPath = NodePath("../TendrilController")

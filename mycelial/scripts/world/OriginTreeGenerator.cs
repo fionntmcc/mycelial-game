@@ -180,11 +180,11 @@ public class OriginTreeGenerator
 				TileType tile;
 
 				if (isEdge)
-					tile = TileType.Bark;
+					tile = TileType.Wood;
 				else if (y > surfaceY - 4) // Bottom of trunk — dead/infected
-					tile = TileType.DeadHeartwood;
+					tile = TileType.Wood;
 				else
-					tile = TileType.Heartwood;
+					tile = TileType.Wood;
 
 				_trunkSegments.Add(new RootSegment
 				{
@@ -209,7 +209,7 @@ public class OriginTreeGenerator
 					{
 						X = baseX + dx,
 						Y = surfaceY + dy,
-						TileType = isEdge ? TileType.Bark : TileType.DeadHeartwood,
+						TileType = isEdge ? TileType.Wood : TileType.Wood,
 						Thickness = 1
 					});
 				}
@@ -238,7 +238,7 @@ public class OriginTreeGenerator
 			{
 				X = (int)x,
 				Y = (int)y,
-				TileType = TileType.BranchWood,
+				TileType = TileType.Wood,
 				Thickness = Math.Max(1, (length - i) / 5)
 			});
 		}
@@ -285,7 +285,7 @@ public class OriginTreeGenerator
 					{
 						X = baseX + dx,
 						Y = canopyCenterY + dy,
-						TileType = isDying ? TileType.DeadCanopy : TileType.Canopy,
+						TileType = isDying ? TileType.Leaf : TileType.Leaf,
 						Thickness = 1
 					});
 				}
@@ -317,11 +317,11 @@ public class OriginTreeGenerator
 
 			int startX = baseX + (int)((i - numBranches / 2.0f) * 2);
 
-			GrowRoot(startX, baseY, dirX, dirY, TileType.ThickRoot, 3, 0);
+			GrowRoot(startX, baseY, dirX, dirY, TileType.Roots, 3, 0);
 		}
 
 		// One deep taproot straight down from center
-		GrowRoot(baseX, baseY + 1, 0, 1.0f, TileType.ThickRoot, 3, 0);
+		GrowRoot(baseX, baseY + 1, 0, 1.0f, TileType.Roots, 3, 0);
 	}
 
 	/// <summary>
@@ -422,9 +422,7 @@ public class OriginTreeGenerator
     {
         return current switch
         {
-            TileType.ThickRoot => TileType.MediumRoot,
-            TileType.MediumRoot => TileType.ThinRoot,
-            TileType.ThinRoot => TileType.RootTip,
+            TileType.Roots => TileType.Roots,
             _ => TileType.RootTip
         };
     }

@@ -5,15 +5,12 @@ using System.Collections.Generic;
 using Mycorrhiza.Data;
 
 /// <summary>
-/// Player-controlled mycelium tendril with an organic multi-tile head,
-/// diagonal movement, gradient trail, and hunger system.
+/// Player-controlled mycelium tendril with a compact 2x2 head,
+/// diagonal movement, and hunger system.
 ///
-/// The tendril head is an organic blob (~3x3 with irregular edges).
-/// As it moves, it leaves a gradient trail:
-///   MyceliumCore  → the head itself (darkest)
-///   MyceliumDark  → 1-2 moves behind (dark)
-///   MyceliumDense → 3-5 moves behind (medium)
-///   Mycelium      → everything older (lightest, permanent territory)
+/// The tendril head uses a fixed 2x2 footprint.
+/// Tiles the tendril travels over settle to Mycelium (lightest)
+/// while the active head remains MyceliumCore.
 ///
 /// Movement: WASD for cardinal, diagonals by holding two keys.
 /// Hunger drains per move, replenished by consuming organic tiles.
@@ -31,70 +28,46 @@ public partial class TendrilController : Node2D
 	[Export] public float HungerRegenOnCorrupted = 0.8f;
 
 	// --- Movement Config ---
-	[Export] public float MoveDelay = 0.08f;     // Fast — the head is big so it covers ground
+	[Export] public float MoveDelay = 0.08f;
 	[Export] public float RetreatSpeed = 0.03f;
 
-	// --- Gradient Trail Config ---
-	private const int DarkTrailLength = 2;       // Moves that stay MyceliumDark
-	private const int DenseTrailLength = 5;      // Moves that stay MyceliumDense
-	// Everything older than DarkTrailLength + DenseTrailLength = Mycelium (lightest)
+	// --- Root Spread Config ---
+	[Export] public bool EnableRootSpread = true;
+	[Export] public float RootSpreadInterval = 1.6f;
+	[Export] public float RootSpawnChanceOnDownMove = 0.20f;
+	[Export] public float RootBranchChance = 0.08f;
+	[Export] public int MaxActiveRoots = 8;
+	[Export] public int RootMinLength = 8;
+	[Export] public int RootMaxLength = 22;
 
 	// --- Tip Shape ---
-	// Organic blob offsets from center. Not a perfect square — irregular, creepy.
-	// This is a ~3x3 core with some extra tendrils poking out.
-	// The shape rotates/varies slightly based on movement direction.
+	// Fixed 2x2 head footprint.
 	private static readonly (int dx, int dy)[] TipShapeBase = new[]
 	{
-		// Core 3x3
-		( 0,  0), (-1,  0), ( 1,  0),
-		( 0, -1), (-1, -1), ( 1, -1),
-		( 0,  1), (-1,  1), ( 1,  1),
-		// Tendrils poking out — makes it look organic, not square
-		(-2,  0), ( 2,  0), ( 0, -2), ( 0,  2),
-		// Diagonal wisps
-		(-2, -1), ( 2,  1), ( 1, -2), (-1,  2),
+		(0, 0),
+		(1, 0),
+		(0, 1),
+		(1, 1),
 	};
 
-	// Alternate shapes for movement direction — the blob shifts as it moves
-	private static readonly (int dx, int dy)[] TipShapeRight = new[]
+	// Root sprouts can emerge from edges and underside of the 2x2 head.
+	private static readonly (int dx, int dy)[] RootSpawnOffsets = new[]
 	{
-		( 0,  0), (-1,  0), ( 1,  0),
-		( 0, -1), (-1, -1), ( 1, -1),
-		( 0,  1), (-1,  1), ( 1,  1),
-		( 2,  0), ( 2, -1), ( 2,  1), // Leading edge stretches right
-		( 3,  0), // Point reaching forward
-		(-2,  0), ( 0, -2), ( 0,  2), // Trailing wisps
+		(-1, 0), (2, 0),
+		(-1, 1), (2, 1),
+		(0, 2), (1, 2),
 	};
 
-	private static readonly (int dx, int dy)[] TipShapeLeft = new[]
+	private struct RootTip
 	{
-		( 0,  0), (-1,  0), ( 1,  0),
-		( 0, -1), (-1, -1), ( 1, -1),
-		( 0,  1), (-1,  1), ( 1,  1),
-		(-2,  0), (-2, -1), (-2,  1),
-		(-3,  0),
-		( 2,  0), ( 0, -2), ( 0,  2),
-	};
-
-	private static readonly (int dx, int dy)[] TipShapeDown = new[]
-	{
-		( 0,  0), (-1,  0), ( 1,  0),
-		( 0, -1), (-1, -1), ( 1, -1),
-		( 0,  1), (-1,  1), ( 1,  1),
-		( 0,  2), (-1,  2), ( 1,  2),
-		( 0,  3),
-		(-2,  0), ( 2,  0), ( 0, -2),
-	};
-
-	private static readonly (int dx, int dy)[] TipShapeUp = new[]
-	{
-		( 0,  0), (-1,  0), ( 1,  0),
-		( 0, -1), (-1, -1), ( 1, -1),
-		( 0,  1), (-1,  1), ( 1,  1),
-		( 0, -2), (-1, -2), ( 1, -2),
-		( 0, -3),
-		(-2,  0), ( 2,  0), ( 0,  2),
-	};
+		public int X;
+		public int Y;
+		public int DirX;
+		public int DirY;
+		public int Length;
+		public int MaxLength;
+		public int StuckSteps;
+	}
 
 	// --- State ---
 	private ChunkManager _chunkManager;
@@ -105,10 +78,13 @@ public partial class TendrilController : Node2D
 	public bool IsRegenerating { get; private set; }
 
 	// Trail: ordered list of head positions (most recent first)
-	// Each entry = one move's head position
-	private readonly List<(int X, int Y)> _trail = new();
+	// Stores original tile at each position for terrain-aware infection
+	private readonly List<(int X, int Y, TileType OriginalTile)> _trail = new();
 	private readonly HashSet<long> _claimedTiles = new();
 	private readonly HashSet<long> _treeTiles = new();
+
+	// Stores the original tile type at each position before we overwrote it
+	private readonly Dictionary<long, TileType> _originalTiles = new();
 
 	// Current tip tiles (for clearing when head moves)
 	private readonly List<(int X, int Y)> _currentTipTiles = new();
@@ -116,9 +92,12 @@ public partial class TendrilController : Node2D
 	private float _moveTimer;
 	private float _retreatTimer;
 	private float _regenTimer;
+	private float _rootSpreadTimer;
 	private List<(int X, int Y)> _rootTips;
 	private int _currentRootTipIdx;
 	private (int dx, int dy) _lastDirection = (0, 1); // Default facing down
+	private readonly List<RootTip> _activeRootTips = new();
+	private readonly System.Random _rng = new();
 
 	public int ClaimedTileCount => _claimedTiles.Count;
 	public HashSet<long> ClaimedTiles => _claimedTiles;
@@ -174,6 +153,8 @@ public partial class TendrilController : Node2D
 		IsRegenerating = false;
 		_trail.Clear();
 		_currentTipTiles.Clear();
+		_activeRootTips.Clear();
+		_rootSpreadTimer = 0f;
 
 		// Place initial tip
 		PlaceTip();
@@ -208,6 +189,7 @@ public partial class TendrilController : Node2D
 		}
 
 		ProcessMovement(dt);
+		ProcessRootSpread(dt);
 	}
 
 	// --- Movement ---
@@ -293,7 +275,10 @@ public partial class TendrilController : Node2D
 		}
 
 		// Record trail position BEFORE moving (for gradient and retreat)
-		_trail.Insert(0, (HeadX, HeadY));
+		// Look up the original tile at current head position
+		long headKey = PackCoords(HeadX, HeadY);
+		TileType origTile = _originalTiles.TryGetValue(headKey, out TileType ot) ? ot : TileType.Dirt;
+		_trail.Insert(0, (HeadX, HeadY, origTile));
 
 		// Move head
 		HeadX = newX;
@@ -309,6 +294,7 @@ public partial class TendrilController : Node2D
 		// Update visuals: place new tip, update gradient trail
 		PlaceTip();
 		UpdateTrailGradient();
+		MaybeSpawnRootTipFromDownwardMove();
 
 		EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
 		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
@@ -335,12 +321,15 @@ public partial class TendrilController : Node2D
 
 			if (_treeTiles.Contains(key)) continue;
 
-			// Check the tile is passable (don't stamp through stone)
 			TileType existing = _chunkManager.GetTileAt(tx, ty);
 			if (TileProperties.Is(existing, TileFlags.Solid) && !TileProperties.Is(existing, TileFlags.Breakable))
 				continue;
 			if (TileProperties.Is(existing, TileFlags.Liquid))
 				continue;
+
+			// Record original tile before we overwrite (only first time)
+			if (!_originalTiles.ContainsKey(key) && !TileProperties.IsMycelium(existing))
+				_originalTiles[key] = existing;
 
 			_chunkManager.SetTileAt(tx, ty, TileType.MyceliumCore);
 			_claimedTiles.Add(key);
@@ -349,41 +338,25 @@ public partial class TendrilController : Node2D
 	}
 
 	/// <summary>
-	/// Get tip shape variant based on movement direction.
-	/// The blob stretches in the direction of movement.
+	/// Get the current tip shape.
 	/// </summary>
 	private static (int dx, int dy)[] GetTipShapeForDirection((int dx, int dy) dir)
 	{
-		if (dir.dx > 0 && dir.dy == 0) return TipShapeRight;
-		if (dir.dx < 0 && dir.dy == 0) return TipShapeLeft;
-		if (dir.dy > 0 && dir.dx == 0) return TipShapeDown;
-		if (dir.dy < 0 && dir.dx == 0) return TipShapeUp;
-		// Diagonal or neutral — use base shape
 		return TipShapeBase;
 	}
 
 	// --- Trail Gradient ---
 
 	/// <summary>
-	/// Update the gradient trail behind the head.
-	/// Recent positions = dark, older = lighter.
+	/// Update tiles behind the head to permanent light mycelium.
 	/// </summary>
 	private void UpdateTrailGradient()
 	{
 		for (int i = 0; i < _trail.Count; i++)
 		{
-			var (tx, ty) = _trail[i];
-			TileType gradientTile;
+			var (tx, ty, _) = _trail[i];
 
-			if (i < DarkTrailLength)
-				gradientTile = TileType.MyceliumDark;
-			else if (i < DarkTrailLength + DenseTrailLength)
-				gradientTile = TileType.MyceliumDense;
-			else
-				gradientTile = TileType.Mycelium;
-
-			// Apply gradient to the tip footprint at this trail position
-			// Use the base shape (not directional) for trail to keep it consistent
+			// Apply light mycelium to the tip footprint at this trail position.
 			foreach (var (dx, dy) in TipShapeBase)
 			{
 				int gx = tx + dx;
@@ -392,11 +365,10 @@ public partial class TendrilController : Node2D
 
 				if (_treeTiles.Contains(key)) continue;
 
-				// Don't downgrade tiles that are part of the current head
 				TileType current = _chunkManager.GetTileAt(gx, gy);
-				if (current == TileType.MyceliumCore && i > 0) // Don't touch the active head
+				if (current == TileType.MyceliumCore)
 				{
-					// Only downgrade if this isn't a current tip tile
+					// Keep active head tiles as MyceliumCore.
 					bool isCurrentTip = false;
 					foreach (var (ctx, cty) in _currentTipTiles)
 					{
@@ -405,41 +377,167 @@ public partial class TendrilController : Node2D
 					if (isCurrentTip) continue;
 				}
 
-				// Only change if it would be a downgrade (darker → lighter over time)
-				if (ShouldDowngrade(current, gradientTile))
+				if (current != TileType.Mycelium)
 				{
-					_chunkManager.SetTileAt(gx, gy, gradientTile);
+					_chunkManager.SetTileAt(gx, gy, TileType.Mycelium);
 				}
 			}
-
-			// Once we've set the lightest gradient, stop processing — rest are already Mycelium
-			if (i >= DarkTrailLength + DenseTrailLength + 2)
-				break;
 		}
 	}
 
-	/// <summary>
-	/// Check if we should replace 'current' with 'target'.
-	/// Only downgrades: Core → Dark → Dense → Mycelium (never upgrades old tiles).
-	/// </summary>
-	private static bool ShouldDowngrade(TileType current, TileType target)
+	// --- Root Spread ---
+
+	private void MaybeSpawnRootTipFromDownwardMove()
 	{
-		int currentRank = GetGradientRank(current);
-		int targetRank = GetGradientRank(target);
-		// Lower rank = lighter. Only change if target is lighter than current.
-		return targetRank < currentRank;
+		if (!EnableRootSpread) return;
+		if (_lastDirection.dy <= 0) return;
+		if (_activeRootTips.Count >= MaxActiveRoots) return;
+		if (_rng.NextDouble() > RootSpawnChanceOnDownMove) return;
+
+		var offset = RootSpawnOffsets[_rng.Next(RootSpawnOffsets.Length)];
+		int startX = HeadX + offset.dx;
+		int startY = HeadY + offset.dy;
+
+		int dirX = offset.dx < 0 ? -1 : (offset.dx > 1 ? 1 : (_rng.Next(3) - 1));
+		int dirY = 1;
+
+		if (!TrySpreadRootInto(startX, startY)) return;
+
+		int maxLength = RootMinLength;
+		if (RootMaxLength > RootMinLength)
+			maxLength += _rng.Next(RootMaxLength - RootMinLength + 1);
+
+		_activeRootTips.Add(new RootTip
+		{
+			X = startX,
+			Y = startY,
+			DirX = dirX,
+			DirY = dirY,
+			Length = 1,
+			MaxLength = maxLength,
+			StuckSteps = 0,
+		});
 	}
 
-	private static int GetGradientRank(TileType t)
+	private void ProcessRootSpread(float dt)
 	{
-		return t switch
+		if (!EnableRootSpread || _activeRootTips.Count == 0) return;
+
+		_rootSpreadTimer += dt;
+		if (_rootSpreadTimer < RootSpreadInterval) return;
+		_rootSpreadTimer -= RootSpreadInterval;
+
+		int idx = _rng.Next(_activeRootTips.Count);
+		var tip = _activeRootTips[idx];
+
+		if (tip.Length >= tip.MaxLength || tip.StuckSteps >= 3)
 		{
-			TileType.Mycelium => 0,
-			TileType.MyceliumDense => 1,
-			TileType.MyceliumDark => 2,
-			TileType.MyceliumCore => 3,
-			_ => -1 // Non-mycelium tiles
-		};
+			_activeRootTips.RemoveAt(idx);
+			return;
+		}
+
+		var (nextDirX, nextDirY) = ChooseNextRootDirection(tip);
+		int nextX = tip.X + nextDirX;
+		int nextY = tip.Y + nextDirY;
+
+		if (TrySpreadRootInto(nextX, nextY))
+		{
+			tip.X = nextX;
+			tip.Y = nextY;
+			tip.DirX = nextDirX;
+			tip.DirY = nextDirY;
+			tip.Length++;
+			tip.StuckSteps = 0;
+			_activeRootTips[idx] = tip;
+			TryBranchRootTip(tip);
+			return;
+		}
+
+		tip.StuckSteps++;
+		tip.Length++;
+		tip.DirX = _rng.Next(3) - 1;
+		tip.DirY = 1;
+
+		if (tip.Length >= tip.MaxLength || tip.StuckSteps >= 3)
+			_activeRootTips.RemoveAt(idx);
+		else
+			_activeRootTips[idx] = tip;
+	}
+
+	private (int dirX, int dirY) ChooseNextRootDirection(RootTip tip)
+	{
+		int dirX = tip.DirX;
+
+		if (_rng.NextDouble() < 0.35f)
+			dirX += _rng.Next(3) - 1;
+
+		if (dirX < -1) dirX = -1;
+		if (dirX > 1) dirX = 1;
+
+		if (dirX == 0 && _rng.NextDouble() < 0.25f)
+			dirX = _rng.Next(2) == 0 ? -1 : 1;
+
+		return (dirX, 1);
+	}
+
+	private void TryBranchRootTip(RootTip parent)
+	{
+		if (_activeRootTips.Count >= MaxActiveRoots) return;
+		if (_rng.NextDouble() > RootBranchChance) return;
+
+		int branchDirX = parent.DirX == 0
+			? (_rng.Next(2) == 0 ? -1 : 1)
+			: -parent.DirX;
+
+		int branchX = parent.X + branchDirX;
+		int branchY = parent.Y + 1;
+
+		if (!TrySpreadRootInto(branchX, branchY)) return;
+
+		int branchMaxLength = RootMinLength;
+		if (RootMaxLength > RootMinLength)
+			branchMaxLength += _rng.Next(RootMaxLength - RootMinLength + 1);
+
+		_activeRootTips.Add(new RootTip
+		{
+			X = branchX,
+			Y = branchY,
+			DirX = branchDirX,
+			DirY = 1,
+			Length = 1,
+			MaxLength = branchMaxLength,
+			StuckSteps = 0,
+		});
+	}
+
+	private bool TrySpreadRootInto(int x, int y)
+	{
+		long key = PackCoords(x, y);
+		if (_treeTiles.Contains(key)) return false;
+
+		TileType tile = _chunkManager.GetTileAt(x, y);
+		if (TileProperties.Is(tile, TileFlags.Liquid)) return false;
+		if (TileProperties.Is(tile, TileFlags.Solid) && !TileProperties.Is(tile, TileFlags.Breakable))
+			return false;
+
+		bool isHeadTile = false;
+		foreach (var (hx, hy) in _currentTipTiles)
+		{
+			if (hx == x && hy == y)
+			{
+				isHeadTile = true;
+				break;
+			}
+		}
+
+		if (!isHeadTile && tile != TileType.Mycelium)
+			_chunkManager.SetTileAt(x, y, TileType.Mycelium);
+
+		if (!_originalTiles.ContainsKey(key) && !TileProperties.IsMycelium(tile))
+			_originalTiles[key] = tile;
+
+		_claimedTiles.Add(key);
+		return true;
 	}
 
 	// --- Retreat ---
@@ -474,7 +572,7 @@ public partial class TendrilController : Node2D
 		}
 
 		// Move head back along trail
-		var (prevX, prevY) = _trail[0];
+		var (prevX, prevY, _) = _trail[0];
 		_trail.RemoveAt(0);
 		HeadX = prevX;
 		HeadY = prevY;
@@ -524,34 +622,48 @@ public partial class TendrilController : Node2D
 		return tile switch
 		{
 			TileType.Dirt => 2.0f,
-			TileType.Topsoil => 2.0f,
 			TileType.Sand => 1.0f,
-			TileType.RichSoil => 5.0f,
-			TileType.MulchLayer => 5.0f,
-			TileType.SmallRoots => 4.0f,
-			TileType.DenseRoots => 6.0f,
-			TileType.AncientRoot => 8.0f,
-			TileType.FungalForestFloor => 6.0f,
-			TileType.CrystallizedSap => 15.0f,
+			TileType.Clay => 0.5f,
+			TileType.Leaf => 4.0f,
+			TileType.Roots => 6.0f,
+			TileType.RootTip => 8.0f,
+
+			// Grass variants — consuming the living surface
+			TileType.GrassFloor or TileType.GrassCeiling
+			or TileType.GrassLWall or TileType.GrassRWall => 4.0f,
+
+			TileType.GrassInnerTL or TileType.GrassInnerTR
+			or TileType.GrassInnerBL or TileType.GrassInnerBR => 4.0f,
+
+			TileType.GrassOuterTL or TileType.GrassOuterTR
+			or TileType.GrassOuterBL or TileType.GrassOuterBR => 4.0f,
+
+			// Resource nodes — big gains
 			TileType.BoneMarrow => 15.0f,
 			TileType.AncientSporeNode => 20.0f,
-			TileType.PhosphorescentMineral => 10.0f,
 			TileType.CrystalGrotte => 12.0f,
-			TileType.Clay => 0.5f,
+			TileType.BioluminescentVein => 8.0f,
+
+			// Air — no gain
 			TileType.Air => 0f,
-			TileType.Mycelium => 0f,
-			TileType.MyceliumDense => 0f,
-			TileType.MyceliumDark => 0f,
-			TileType.MyceliumCore => 0f,
+
+			// Already infected — no gain
+			TileType.Mycelium or TileType.MyceliumDense
+			or TileType.MyceliumDark or TileType.MyceliumCore
+			or TileType.InfectedDirt => 0f,
+
+			// Infected grass — no gain (already consumed)
+			_ when TileProperties.IsInfectedGrass(tile) => 0f,
+
+			// Default — tiny gain if organic, nothing otherwise
 			_ => TileProperties.Is(tile, TileFlags.Organic) ? 1.0f : 0f,
 		};
 	}
 
 	private static bool IsHardTile(TileType tile)
 	{
-		return tile == TileType.Clay || tile == TileType.ClayDeposit
-			|| tile == TileType.DenseRoots || tile == TileType.AncientRoot
-			|| tile == TileType.Gravel;
+		return tile == TileType.Clay || tile == TileType.Gravel
+			|| tile == TileType.Roots;
 	}
 
 	// --- Tree Registration ---
@@ -575,10 +687,8 @@ public partial class TendrilController : Node2D
 
 	private static bool IsTreeTile(TileType t)
 	{
-		return t == TileType.Bark || t == TileType.Heartwood || t == TileType.DeadHeartwood
-			|| t == TileType.BranchWood || t == TileType.Canopy || t == TileType.DeadCanopy
-			|| t == TileType.ThickRoot || t == TileType.MediumRoot
-			|| t == TileType.ThinRoot || t == TileType.RootTip;
+		return t == TileType.Wood || t == TileType.Leaf
+			|| t == TileType.Roots || t == TileType.RootTip;
 	}
 
 	// --- Utility ---
@@ -589,6 +699,37 @@ public partial class TendrilController : Node2D
 			HeadX * WorldConfig.TileSize + WorldConfig.TileSize / 2f,
 			HeadY * WorldConfig.TileSize + WorldConfig.TileSize / 2f
 		);
+	}
+
+	/// <summary>Check if a world tile position overlaps the current tendril head.</summary>
+	public bool OverlapsHead(int worldX, int worldY)
+	{
+		foreach (var (tx, ty) in _currentTipTiles)
+		{
+			if (tx == worldX && ty == worldY) return true;
+		}
+		return false;
+	}
+
+	/// <summary>Check if a world tile position is on claimed mycelium territory.</summary>
+	public bool IsOnTerritory(int worldX, int worldY)
+	{
+		return _claimedTiles.Contains(PackCoords(worldX, worldY));
+	}
+
+	/// <summary>Add hunger from external source (e.g. consuming a creature).</summary>
+	public void AddHunger(float amount)
+	{
+		Hunger = System.Math.Min(MaxHunger, Hunger + amount);
+		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
+	}
+
+	/// <summary>Drain hunger from external source (e.g. creature attack).</summary>
+	public void DrainHunger(float amount)
+	{
+		Hunger = System.Math.Max(0, Hunger - amount);
+		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
+		if (Hunger <= 0) StartRetreat();
 	}
 
 	public static long PackCoords(int x, int y)

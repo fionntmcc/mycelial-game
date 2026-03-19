@@ -24,6 +24,7 @@ using Mycorrhiza.Data;
 public partial class MyceliumSystem : Node2D
 {
 	[Export] public NodePath ChunkManagerPath { get; set; }
+	[Export] public bool EnableAutonomousSpread = false;
 
 	// --- Tunable Parameters ---
 
@@ -76,6 +77,13 @@ public partial class MyceliumSystem : Node2D
 		if (_chunkManager == null)
 		{
 			GD.PrintErr("MyceliumSystem: No ChunkManager assigned!");
+			return;
+		}
+
+		if (!EnableAutonomousSpread)
+		{
+			SetProcess(false);
+			GD.Print("MyceliumSystem: Autonomous spread disabled. Tendril movement is the only spread source.");
 			return;
 		}
 
@@ -150,10 +158,8 @@ public partial class MyceliumSystem : Node2D
 
 	private static bool IsTreeTile(TileType t)
 	{
-		return t == TileType.Bark || t == TileType.Heartwood || t == TileType.DeadHeartwood
-			|| t == TileType.BranchWood || t == TileType.Canopy || t == TileType.DeadCanopy
-			|| t == TileType.ThickRoot || t == TileType.MediumRoot
-			|| t == TileType.ThinRoot || t == TileType.RootTip;
+		return t == TileType.Wood || t == TileType.Leaf
+			|| t == TileType.Roots || t == TileType.RootTip;
 	}
 
 	public override void _Process(double delta)
@@ -204,10 +210,7 @@ public partial class MyceliumSystem : Node2D
 			// Only spread into organic tiles or air adjacent to mycelium
 			bool canSpread = TileProperties.Is(current, TileFlags.Organic)
 						  || current == TileType.Air
-						  || current == TileType.Dirt
-						  || current == TileType.Topsoil
-						  || current == TileType.RichSoil
-						  || current == TileType.MulchLayer;
+						  || current == TileType.Dirt;
 
 			if (!canSpread) continue;
 

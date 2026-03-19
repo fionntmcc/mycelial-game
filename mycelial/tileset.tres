@@ -1,9 +1,13 @@
 [gd_resource type="TileSet" format=3 uid="uid://do14mhd2uo3fp"]
 
-[ext_resource type="Texture2D" uid="uid://bmg0s1syrah0t" path="res://art/tiles.png" id="1_2urvg"]
+[sub_resource type="CompressedTexture2D" id="CompressedTexture2D_fh51i"]
+load_path = "res://.godot/imported/tiles.png-4bebe0e5cdfc7faf322603713a4a3f81.ctex"
+
+[sub_resource type="CompressedTexture2D" id="CompressedTexture2D_creatures"]
+load_path = "res://.godot/imported/creatures.png-e460b68b7418b972114fc4ee933cc9f8.ctex"
 
 [sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_ej02t"]
-texture = ExtResource("1_2urvg")
+texture = SubResource("CompressedTexture2D_fh51i")
 1:0/0 = 0
 2:0/0 = 0
 3:0/0 = 0
@@ -260,5 +264,25 @@ texture = ExtResource("1_2urvg")
 14:15/0 = 0
 15:15/0 = 0
 
+[sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_creatures"]
+texture = SubResource("CompressedTexture2D_creatures")
+0:9/0 = 0
+1:9/0 = 0
+2:9/0 = 0
+3:9/0 = 0
+4:9/0 = 0
+5:9/0 = 0
+6:9/0 = 0
+7:9/0 = 0
+8:9/0 = 0
+9:9/0 = 0
+0:10/0 = 0
+1:10/0 = 0
+2:10/0 = 0
+3:10/0 = 0
+4:10/0 = 0
+5:10/0 = 0
+
 [resource]
 sources/0 = SubResource("TileSetAtlasSource_ej02t")
+sources/1 = SubResource("TileSetAtlasSource_creatures")

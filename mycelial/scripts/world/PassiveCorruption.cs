@@ -23,12 +23,13 @@ public partial class PassiveCorruption : Node2D
 {
     [Export] public NodePath ChunkManagerPath { get; set; }
     [Export] public NodePath TendrilControllerPath { get; set; }
+    [Export] public bool EnablePassiveSpread = true;
 
     /// <summary>Seconds between passive spread ticks.</summary>
-    [Export] public float SpreadInterval = 3.0f;
+    [Export] public float SpreadInterval = 0.2f;
 
     /// <summary>Max tiles to spread per tick.</summary>
-    [Export] public int SpreadsPerTick = 1;
+    [Export] public int SpreadsPerTick = 8;
 
     private ChunkManager _chunkManager;
     private TendrilController _tendril;
@@ -53,10 +54,16 @@ public partial class PassiveCorruption : Node2D
         {
             GD.PrintErr("PassiveCorruption: Missing ChunkManager or TendrilController!");
         }
+
+        if (!EnablePassiveSpread)
+        {
+            GD.Print("PassiveCorruption: Passive spread disabled. Tendril movement is the only spread source.");
+        }
     }
 
     public override void _Process(double delta)
     {
+        if (!EnablePassiveSpread) return;
         if (_chunkManager == null || _tendril == null) return;
 
         // Refresh frontier when player claims new tiles
@@ -92,12 +99,23 @@ public partial class PassiveCorruption : Node2D
             int x = (int)((key >> 20) - 65536);
             int y = (int)((key & 0xFFFFF) - 65536);
 
-            // Check 4 neighbors
-            TryAddToFrontier(x - 1, y);
-            TryAddToFrontier(x + 1, y);
-            TryAddToFrontier(x, y - 1);
-            TryAddToFrontier(x, y + 1);
+            AddAdjacentToFrontier(x, y);
         }
+    }
+
+    private void AddAdjacentToFrontier(int x, int y)
+    {
+        // Cardinals
+        TryAddToFrontier(x - 1, y);
+        TryAddToFrontier(x + 1, y);
+        TryAddToFrontier(x, y - 1);
+        TryAddToFrontier(x, y + 1);
+
+        // Diagonals so corruption flows across corner-connected grass too
+        TryAddToFrontier(x - 1, y - 1);
+        TryAddToFrontier(x + 1, y - 1);
+        TryAddToFrontier(x - 1, y + 1);
+        TryAddToFrontier(x + 1, y + 1);
     }
 
     private void TryAddToFrontier(int x, int y)
@@ -110,13 +128,29 @@ public partial class PassiveCorruption : Node2D
 
         TileType tile = _chunkManager.GetTileAt(x, y);
 
-        // Only spread into organic/soft tiles
-        if (TileProperties.Is(tile, TileFlags.Organic) || tile == TileType.Dirt
-            || tile == TileType.Topsoil || tile == TileType.Sand)
-        {
-            _frontierSet.Add(key);
-            _frontier.Add((x, y));
-        }
+        // Skip if already infected
+        if (TileProperties.IsMycelium(tile)) return;
+
+        // Grass-only conversion rule: only normal grass can be added.
+        if (!TileProperties.IsGrass(tile)) return;
+
+        // Candidate grass must touch existing corruption (mycelium or infected grass).
+        if (!HasAdjacentCorruption(x, y)) return;
+
+        _frontierSet.Add(key);
+        _frontier.Add((x, y));
+    }
+
+    private bool HasAdjacentCorruption(int x, int y)
+    {
+        return TileProperties.IsMycelium(_chunkManager.GetTileAt(x - 1, y))
+            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x + 1, y))
+            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x, y - 1))
+            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x, y + 1))
+            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x - 1, y - 1))
+            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x + 1, y - 1))
+            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x - 1, y + 1))
+            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x + 1, y + 1));
     }
 
     private void SpreadTick()
@@ -141,23 +175,17 @@ public partial class PassiveCorruption : Node2D
 
             // Verify tile is still valid
             TileType tile = _chunkManager.GetTileAt(x, y);
-            if (tile == TileType.Mycelium || tile == TileType.MyceliumDense
-                || tile == TileType.MyceliumDark || tile == TileType.MyceliumCore)
-                continue;
-            if (tile == TileType.Air) continue;
-            if (!TileProperties.Is(tile, TileFlags.Organic) && tile != TileType.Dirt
-                && tile != TileType.Topsoil && tile != TileType.Sand)
-                continue;
+            if (TileProperties.IsMycelium(tile)) continue;
+            if (!TileProperties.IsGrass(tile)) continue;
+            if (!HasAdjacentCorruption(x, y)) continue;
 
-            // Corrupt it
-            _chunkManager.SetTileAt(x, y, TileType.Mycelium);
+            // Terrain-aware corruption: grass becomes infected grass, dirt becomes infected dirt
+            TileType infectedTile = TileProperties.GetInfectedVariant(tile);
+            _chunkManager.SetTileAt(x, y, infectedTile);
             _tendril.ClaimedTiles.Add(TendrilController.PackCoords(x, y));
 
             // Add its neighbors to frontier
-            TryAddToFrontier(x - 1, y);
-            TryAddToFrontier(x + 1, y);
-            TryAddToFrontier(x, y - 1);
-            TryAddToFrontier(x, y + 1);
+            AddAdjacentToFrontier(x, y);
         }
     }
 }

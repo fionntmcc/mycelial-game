@@ -35,6 +35,7 @@ public partial class ChunkRenderer : Node2D
         // Create the TileMapLayer for rendering
         _tileMapLayer = new TileMapLayer();
         _tileMapLayer.TileSet = tileSet;
+        _tileMapLayer.TextureFilter = CanvasItem.TextureFilterEnum.Nearest;
         _tileMapLayer.Name = $"ChunkTiles_{_data.ChunkX}_{_data.ChunkY}";
         AddChild(_tileMapLayer);
 
@@ -103,12 +104,19 @@ public partial class ChunkRenderer : Node2D
 		int atlasColumns = 16; // Tiles per row in your atlas texture
 		int tileId = (ushort)tile;
 		var atlasCoords = new Vector2I(tileId % atlasColumns, tileId / atlasColumns);
+		int sourceId = IsCreatureTile(tile) ? 1 : 0;
 
 		_tileMapLayer.SetCell(
 			new Vector2I(lx, ly),
-			sourceId: 0,          // Atlas source index in TileSet
+			sourceId: sourceId,
 			atlasCoords: atlasCoords
 		);
+	}
+
+	private static bool IsCreatureTile(TileType tile)
+	{
+		int id = (ushort)tile;
+		return id >= 144 && id <= 165;
 	}
 
 	/// <summary>

@@ -49,8 +49,8 @@ public class NoiseGenerator
         CaveNoise = CreateNoise(Seed + 1, WorldConfig.CaveFrequency,
             FastNoiseLite.NoiseTypeEnum.SimplexSmooth, FastNoiseLite.FractalTypeEnum.Fbm, 3);
 
-        CaveDetail = CreateNoise(Seed + 2, WorldConfig.CaveFrequency * 2.0f,
-            FastNoiseLite.NoiseTypeEnum.SimplexSmooth, FastNoiseLite.FractalTypeEnum.Ridged, 2);
+        CaveDetail = CreateNoise(Seed + 2, WorldConfig.CaveFrequency * 1.2f,
+            FastNoiseLite.NoiseTypeEnum.SimplexSmooth, FastNoiseLite.FractalTypeEnum.Ridged, 1);
 
         BiomeBoundaryNoise = CreateNoise(Seed + 3, WorldConfig.BiomeBoundaryNoise,
             FastNoiseLite.NoiseTypeEnum.Perlin, FastNoiseLite.FractalTypeEnum.Fbm, 2);
@@ -103,10 +103,10 @@ public class NoiseGenerator
         float n1 = CaveNoise.GetNoise2D(worldTileX, worldTileY);
         float n2 = CaveDetail.GetNoise2D(worldTileX, worldTileY);
 
-        // Combine the two noise values. The threshold is adjusted by biome cave density.
-        // Higher caveDensity = lower threshold = more caves
-        float combined = (n1 + n2 * 0.5f) / 1.5f;
-        float threshold = WorldConfig.CaveThreshold + (0.5f - biomeCaveDensity) * 0.4f;
+        // Combine the two noise values with low detail influence for smoother cave outlines.
+        // Biome cave density still affects threshold, but with a narrow range so caves stay rare.
+		float combined = (n1 + n2 * 0.20f) / 1.20f;
+		float threshold = WorldConfig.CaveThreshold + (0.5f - biomeCaveDensity) * 0.12f;
 
         return combined > threshold;
     }
