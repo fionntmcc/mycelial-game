@@ -1,6 +1,7 @@
 namespace Mycorrhiza.World;
 
 using Godot;
+using System.Collections.Generic;
 using Mycorrhiza.Data;
 
 /// <summary>
@@ -19,7 +20,9 @@ public partial class FogOfWar : Node2D
     [Export(PropertyHint.Range, "1,48,1")] public int VisionRadiusTiles = 9;
     [Export(PropertyHint.Range, "1,96,1")] public int AirPocketSightRadiusTiles = 28;
     [Export(PropertyHint.Range, "1,3,1")] public int AirPocketContactRadius = 1;
-    [Export(PropertyHint.Range, "0,1,0.01")] public float UnexploredAlpha = 0.9f;
+    [Export(PropertyHint.Range, "0,1,0.01")] public float HiddenFogAlpha = 1.0f;
+    [Export(PropertyHint.Range, "0,1,0.01")] public float GradientInnerAlpha = 0.22f;
+    [Export(PropertyHint.Range, "0,12,1")] public int GradientWidthTiles = 3;
     [Export] public Color FogColor = new Color(0f, 0f, 0f, 1f);
 
     private TendrilController _tendril;
@@ -78,27 +81,52 @@ public partial class FogOfWar : Node2D
         int airPocketSightSq = AirPocketSightRadiusTiles * AirPocketSightRadiusTiles;
 
         bool hasAirPocketSight = IsInAirPocket(headX, headY);
+        var visibleTiles = new HashSet<long>();
 
+        // Pass 1: cache visibility for every tile in view.
         for (int y = minY; y <= maxY; y++)
         {
             for (int x = minX; x <= maxX; x++)
             {
-                int dx = x - headX;
-                int dy = y - headY;
-                int distSq = dx * dx + dy * dy;
+                if (IsTileVisible(x, y, headX, headY, visionSq, airPocketSightSq, hasAirPocketSight))
+                    visibleTiles.Add(PackCoords(x, y));
+            }
+        }
 
-                // Always reveal the central circular vision area around the tendril.
-                if (distSq <= visionSq)
+        float hiddenAlpha = Mathf.Clamp(HiddenFogAlpha, 0f, 1f);
+        float edgeAlpha = Mathf.Clamp(GradientInnerAlpha, 0f, hiddenAlpha);
+        int gradientWidth = System.Math.Max(0, GradientWidthTiles);
+
+        // Pass 2: draw fog where tiles are not visible.
+        for (int y = minY; y <= maxY; y++)
+        {
+            for (int x = minX; x <= maxX; x++)
+            {
+                if (visibleTiles.Contains(PackCoords(x, y)))
                     continue;
 
-                bool visibleByAirPocketSight = false;
-                if (hasAirPocketSight && distSq <= airPocketSightSq)
-                    visibleByAirPocketSight = HasLineOfSight(headX, headY, x, y);
+                float alpha = hiddenAlpha;
+                if (gradientWidth > 0)
+                {
+                    int nearestVisibleDist = DistanceToNearestVisibleTile(
+                        x,
+                        y,
+                        minX,
+                        minY,
+                        maxX,
+                        maxY,
+                        gradientWidth,
+                        visibleTiles
+                    );
 
-                if (visibleByAirPocketSight)
-                    continue;
+                    if (nearestVisibleDist <= gradientWidth)
+                    {
+                        float t = nearestVisibleDist / (float)gradientWidth;
+                        alpha = Mathf.Lerp(edgeAlpha, hiddenAlpha, t);
+                    }
+                }
 
-                Color drawColor = new Color(FogColor.R, FogColor.G, FogColor.B, Mathf.Clamp(UnexploredAlpha, 0f, 1f));
+                Color drawColor = new Color(FogColor.R, FogColor.G, FogColor.B, alpha);
                 Rect2 tileRect = new Rect2(
                     x * WorldConfig.TileSize,
                     y * WorldConfig.TileSize,
@@ -109,6 +137,60 @@ public partial class FogOfWar : Node2D
                 DrawRect(tileRect, drawColor, true);
             }
         }
+    }
+
+    private bool IsTileVisible(int x, int y, int headX, int headY, int visionSq, int airPocketSightSq, bool hasAirPocketSight)
+    {
+        int dx = x - headX;
+        int dy = y - headY;
+        int distSq = dx * dx + dy * dy;
+
+        if (distSq <= visionSq)
+            return true;
+
+        if (hasAirPocketSight && distSq <= airPocketSightSq)
+            return HasLineOfSight(headX, headY, x, y);
+
+        return false;
+    }
+
+    private static int DistanceToNearestVisibleTile(
+        int x,
+        int y,
+        int minX,
+        int minY,
+        int maxX,
+        int maxY,
+        int maxDistance,
+        HashSet<long> visibleTiles)
+    {
+        for (int radius = 1; radius <= maxDistance; radius++)
+        {
+            int left = x - radius;
+            int right = x + radius;
+            int top = y - radius;
+            int bottom = y + radius;
+
+            for (int ix = left; ix <= right; ix++)
+            {
+                if (top >= minY && top <= maxY && ix >= minX && ix <= maxX && visibleTiles.Contains(PackCoords(ix, top)))
+                    return radius;
+
+                if (bottom >= minY && bottom <= maxY && ix >= minX && ix <= maxX && visibleTiles.Contains(PackCoords(ix, bottom)))
+                    return radius;
+            }
+
+            for (int iy = top + 1; iy <= bottom - 1; iy++)
+            {
+                if (left >= minX && left <= maxX && iy >= minY && iy <= maxY && visibleTiles.Contains(PackCoords(left, iy)))
+                    return radius;
+
+                if (right >= minX && right <= maxX && iy >= minY && iy <= maxY && visibleTiles.Contains(PackCoords(right, iy)))
+                    return radius;
+            }
+        }
+
+        return maxDistance + 1;
     }
 
     private bool IsInAirPocket(int centerX, int centerY)
@@ -172,5 +254,10 @@ public partial class FogOfWar : Node2D
     {
         TileType tile = _chunkManager.GetTileAt(x, y);
         return TileProperties.Is(tile, TileFlags.Solid);
+    }
+
+    private static long PackCoords(int x, int y)
+    {
+        return ((long)(x + 65536) << 20) | (long)(y + 65536);
     }
 }
