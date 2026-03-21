@@ -77,14 +77,30 @@ public partial class TendrilController : Node2D
 	/// <summary>Speed of the blob shape animation (makes it pulse/shift).</summary>
 	[Export] public float BlobAnimSpeed = 1.8f;
 
-	// --- Quasi-Periodic Wobble ---
-	// The head drifts off-center with a wobble that never repeats.
-	// Sum of sine waves with irrational frequency ratios.
-	/// <summary>Max wobble offset in sub-cells. 0 = disabled.</summary>
-	[Export] public float WobbleAmplitude = 3.5f;
+	// --- Undulation ---
+	// The head sways perpendicular to movement direction, driven by distance
+	// traveled — like a root or worm undulating as it pushes forward.
+	// Uses summed sines with irrational frequency ratios (quasi-periodic).
+	// Amplitude smoothly dampens to zero when stopped so there's no jump on restart.
 
-	/// <summary>Overall speed of the wobble oscillation.</summary>
-	[Export] public float WobbleSpeed = 1.0f;
+	/// <summary>Max undulation offset in sub-cells at full speed.</summary>
+	[Export] public float UndulationAmplitude = 3.5f;
+
+	/// <summary>Base frequency of the undulation. Higher = tighter waves.</summary>
+	[Export] public float UndulationFrequency = 0.8f;
+
+	/// <summary>How fast amplitude ramps up/down when starting/stopping (per second).</summary>
+	[Export] public float UndulationRampSpeed = 3.0f;
+
+	// --- Creature Auto-Steer ---
+	/// <summary>Path to CreatureManager node (for auto-steering toward nearby prey).</summary>
+	[Export] public NodePath CreatureManagerPath { get; set; }
+
+	/// <summary>Radius in terrain tiles to scan for creatures to steer toward.</summary>
+	[Export] public int CreatureSteerRadius = 6;
+
+	/// <summary>How strongly the tendril steers toward nearby creatures (0–1).</summary>
+	[Export] public float CreatureSteerStrength = 0.15f;
 
 	// =========================================================================
 	//  ROOT TIP GROWTH (same structures as before — operates on terrain tiles)
@@ -176,8 +192,13 @@ public partial class TendrilController : Node2D
 	// Blob animation
 	private FastNoiseLite _blobNoise;
 	private float _blobAnimTime;
-	private float _wobbleTime;
+	private float _undulationPhase;       // Advances with distance traveled, not time
+	private float _undulationAmplitudeCur; // Smoothly ramps toward target (0 when stopped)
+	private Vector2 _wobbleOffset;         // Current world-space wobble offset for camera
 	private ushort _trailAgeCounter;
+
+	// Creature auto-steering
+	private CreatureManager _creatureManager;
 
 	// Track which terrain tile we last entered (to trigger gameplay effects once per tile)
 	private int _lastTerrainX;
@@ -220,6 +241,10 @@ public partial class TendrilController : Node2D
 		_blobNoise.NoiseType = FastNoiseLite.NoiseTypeEnum.Simplex;
 		_blobNoise.Frequency = 0.5f; // Adjusted at sample time
 		_blobNoise.Seed = _rng.Next();
+
+		// Creature auto-steering (optional — works fine without)
+		if (CreatureManagerPath != null)
+			_creatureManager = GetNode<CreatureManager>(CreatureManagerPath);
 
 		Hunger = MaxHunger;
 		CallDeferred(nameof(Initialize));
@@ -280,7 +305,10 @@ public partial class TendrilController : Node2D
 
 		float dt = (float)delta;
 		_blobAnimTime += dt * BlobAnimSpeed;
-		_wobbleTime += dt * WobbleSpeed;
+
+		// Ramp undulation amplitude based on movement speed
+		float targetAmplitude = (_momentum.Length() > MomentumDeadZone) ? UndulationAmplitude : 0f;
+		_undulationAmplitudeCur = Mathf.MoveToward(_undulationAmplitudeCur, targetAmplitude, UndulationRampSpeed * dt);
 
 		if (IsRegenerating)
 		{
@@ -354,6 +382,32 @@ public partial class TendrilController : Node2D
 		else
 		{
 			_momentum = _momentum.MoveToward(Vector2.Zero, MomentumDrag * dt);
+		}
+
+		// --- Creature Auto-Steer ---
+		// Subtly nudge momentum toward nearby creatures (prey attraction).
+		if (_creatureManager != null && _momentum.Length() > MomentumDeadZone && CreatureSteerStrength > 0f)
+		{
+			var nearest = _creatureManager.GetNearestCreaturePosition(HeadX, HeadY, CreatureSteerRadius);
+			if (nearest.HasValue)
+			{
+				// Direction from head to creature in sub-grid space
+				int scale = WorldConfig.SubGridScale;
+				Vector2 creatureSubPos = new Vector2(
+					nearest.Value.X * scale + scale / 2f,
+					nearest.Value.Y * scale + scale / 2f
+				);
+				Vector2 headPos = new Vector2(_subHeadX, _subHeadY);
+				Vector2 toCreature = (creatureSubPos - headPos).Normalized();
+
+				// Blend toward creature direction — subtle so player stays in control
+				float steerAmount = CreatureSteerStrength * _momentum.Length();
+				_momentum += toCreature * steerAmount * dt;
+
+				// Don't let steering increase speed beyond normal range
+				if (_momentum.Length() > 1f)
+					_momentum = _momentum.Normalized() * 1f;
+			}
 		}
 
 		float speed = Mathf.Clamp(_momentum.Length(), 0f, 1f);
@@ -524,6 +578,9 @@ public partial class TendrilController : Node2D
 		_lastTerrainX = terrainX;
 		_lastTerrainY = terrainY;
 
+		// Advance undulation phase by distance (not time) — creates root-like sway
+		_undulationPhase += UndulationFrequency;
+
 		// Place new organic blob
 		PlaceBlob();
 
@@ -539,33 +596,39 @@ public partial class TendrilController : Node2D
 
 	/// <summary>
 	/// Generate an organic blob shape on the sub-grid around the current head position.
-	/// Uses noise-modulated radius for irregular edges that shift over time.
-	/// The blob stretches slightly in the movement direction for a "reaching" look.
+	///
+	/// The undulation is PERPENDICULAR to the movement direction — like a root
+	/// or worm swaying side-to-side as it pushes forward. Phase advances by
+	/// distance traveled (in TrySubMove), not by time, so:
+	///   - The wave pattern is tied to the path, not the clock
+	///   - Stopping smoothly dampens amplitude to zero (no jumping)
+	///   - Resuming smoothly ramps it back up from wherever the phase was
 	/// </summary>
 	private void PlaceBlob()
 	{
 		_currentCoreCells.Clear();
 
-		// Quasi-periodic wobble — sum of sines with irrational frequency ratios.
-		// Never repeats, always looks organic.
-		float t = _wobbleTime;
-		float wobbleX = WobbleAmplitude * (
-			Mathf.Sin(t * 1.0f) * 0.50f +
-			Mathf.Sin(t * 2.3f) * 0.30f +
-			Mathf.Sin(t * 0.7f) * 0.20f
-		);
-		float wobbleY = WobbleAmplitude * (
-			Mathf.Sin(t * 1.1f + 1.3f) * 0.45f +
-			Mathf.Sin(t * 1.9f + 0.7f) * 0.35f +
-			Mathf.Sin(t * 0.6f + 2.1f) * 0.20f
-		);
-		// Use different phase offsets on Y so the wobble traces a Lissajous-like path
+		// Perpendicular undulation: sway side-to-side relative to movement direction.
+		// Perpendicular vector to _lastMoveDir:
+		Vector2 perp = new Vector2(-_lastMoveDir.Y, _lastMoveDir.X);
 
-		int centerX = _subHeadX + (int)wobbleX;
-		int centerY = _subHeadY + (int)wobbleY;
+		// Quasi-periodic offset — sum of sines at irrational frequency ratios
+		// driven by _undulationPhase (which advances by distance, not time).
+		float p = _undulationPhase;
+		//float sway = _undulationAmplitudeCur * (
+			//Mathf.Sin(p * 1.0f) * 0.50f +
+			//Mathf.Sin(p * 2.3f) * 0.30f +
+			//Mathf.Sin(p * 0.7f) * 0.20f
+		//);
+		float sway = _undulationAmplitudeCur * Mathf.Sin(p);
+
+		// Apply offset perpendicular to movement
+		_wobbleOffset = perp * sway;
+		int centerX = _subHeadX + Mathf.RoundToInt(_wobbleOffset.X);
+		int centerY = _subHeadY + Mathf.RoundToInt(_wobbleOffset.Y);
 
 		int radius = BlobBaseRadius;
-		int scanRange = radius + (int)BlobNoiseAmplitude + (int)WobbleAmplitude + 2;
+		int scanRange = radius + (int)BlobNoiseAmplitude + (int)UndulationAmplitude + 2;
 
 		for (int dy = -scanRange; dy <= scanRange; dy++)
 		{
@@ -1056,15 +1119,15 @@ public partial class TendrilController : Node2D
 	// =========================================================================
 
 	/// <summary>
-	/// Get the head position in world pixels, using sub-grid for smooth positioning.
-	/// The camera should follow this for fluid tracking.
+	/// Get the head position in world pixels, including undulation offset.
+	/// The camera should follow this for fluid tracking that moves with the sway.
 	/// </summary>
 	public Vector2 GetHeadPixelPosition()
 	{
 		int cellSize = WorldConfig.SubCellSize;
 		return new Vector2(
-			_subHeadX * cellSize + cellSize / 2f,
-			_subHeadY * cellSize + cellSize / 2f
+			(_subHeadX + _wobbleOffset.X) * cellSize + cellSize / 2f,
+			(_subHeadY + _wobbleOffset.Y) * cellSize + cellSize / 2f
 		);
 	}
 

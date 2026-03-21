@@ -37,13 +37,14 @@ ChunkManagerPath = NodePath("../ChunkManager")
 script = ExtResource("5_qfnet")
 ChunkManagerPath = NodePath("../ChunkManager")
 HungerRegenOnCorrupted = 4.0
-MoveDelay = 0.05
+MoveDelay = 0.09
 MomentumAcceleration = 15.0
 MomentumDrag = 5.0
 MinMoveDelayMultiplier = 0.35
 BlobBaseRadius = 1
-WobbleAmplitude = 10.0
-WobbleSpeed = 4.0
+UndulationAmplitude = 15.0
+UndulationFrequency = 0.12
+UndulationRampSpeed = 0.25
 
 [node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
 script = ExtResource("7_4mrxx")
@@ -67,7 +68,7 @@ TendrilControllerPath = NodePath("../TendrilController")
 [node name="CreatureManager" type="Node2D" parent="CreatureManager" unique_id=1653449213]
 script = ExtResource("8_4mrxx")
 ChunkManagerPath = NodePath("../ChunkManager")
-TendrilControllerPath = NodePath("../TendrilController")
+TendrilControllerPath = NodePath("../../TendrilController")
 
 [node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=145948951]
 script = ExtResource("10_w7kh3")
