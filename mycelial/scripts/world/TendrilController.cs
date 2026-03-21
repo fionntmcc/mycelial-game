@@ -155,6 +155,9 @@ public partial class TendrilController : Node2D
 	// Track last tile position for root spawn triggering
 	private (int X, int Y) _lastTileForRoots;
 
+	// Track which tile currently displays MyceliumCore (the visual head marker)
+	private (int X, int Y) _headCoreTile = (-99999, -99999);
+
 	// Fallback position before head initializes
 	private int _fallbackHeadX;
 	private int _fallbackHeadY;
@@ -212,6 +215,9 @@ public partial class TendrilController : Node2D
 		if (idx >= _rootTips.Count) idx = 0;
 		var (tileX, tileY) = _rootTips[idx];
 
+		// Clear previous head marker if it exists
+		ClearHeadCoreTile();
+
 		_fallbackHeadX = tileX;
 		_fallbackHeadY = tileY;
 
@@ -230,6 +236,9 @@ public partial class TendrilController : Node2D
 		_tilesSinceLastRootSpawn = 0;
 		_lastTileForRoots = (tileX, tileY);
 		ScheduleNextRootSpawnDistance();
+
+		// Place initial head marker
+		PlaceHeadCoreTile(tileX, tileY);
 
 		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
 		EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
@@ -259,6 +268,9 @@ public partial class TendrilController : Node2D
 
 		// --- 1. Update head physics ---
 		_head.Update(dt);
+
+		// --- 1b. Move MyceliumCore marker to current head tile ---
+		UpdateHeadCoreTile();
 
 		// --- 2. Record trail for spline renderer ---
 		_splineRenderer.RecordPoint(_head.HeadPosition, _head.Speed);
@@ -345,6 +357,7 @@ public partial class TendrilController : Node2D
 		if (IsRetreating) return;
 		IsRetreating = true;
 		_retreatTimer = 0;
+		ClearHeadCoreTile();
 		GD.Print("Tendril retreating!");
 		EmitSignal(SignalName.RetreatStarted);
 	}
@@ -663,6 +676,74 @@ public partial class TendrilController : Node2D
 		Hunger = System.Math.Max(0, Hunger - amount);
 		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
 		if (Hunger <= 0) StartRetreat();
+	}
+
+	// =========================================================================
+	//  HEAD CORE TILE — Visual marker at current head position
+	// =========================================================================
+
+	/// <summary>
+	/// Check if the head has moved to a new tile, and if so, move the
+	/// MyceliumCore marker: clear it from the old tile, place it on the new one.
+	/// </summary>
+	private void UpdateHeadCoreTile()
+	{
+		int hx = HeadX;
+		int hy = HeadY;
+
+		// Same tile — nothing to do
+		if (hx == _headCoreTile.X && hy == _headCoreTile.Y)
+			return;
+
+		// Clear old marker
+		ClearHeadCoreTile();
+
+		// Place new marker
+		PlaceHeadCoreTile(hx, hy);
+	}
+
+	/// <summary>
+	/// Place MyceliumCore at the given tile, marking it as the head position.
+	/// </summary>
+	private void PlaceHeadCoreTile(int tileX, int tileY)
+	{
+		long key = PackCoords(tileX, tileY);
+
+		// Don't overwrite tree tiles
+		if (_treeTiles.Contains(key))
+		{
+			_headCoreTile = (-99999, -99999);
+			return;
+		}
+
+		TileType existing = _chunkManager.GetTileAt(tileX, tileY);
+
+		// Record original tile if we haven't already
+		if (!_originalTiles.ContainsKey(key) && !TileProperties.IsMycelium(existing))
+			_originalTiles[key] = existing;
+
+		_chunkManager.SetTileAt(tileX, tileY, TileType.MyceliumCore);
+		_claimedTiles.Add(key);
+		_headCoreTile = (tileX, tileY);
+	}
+
+	/// <summary>
+	/// Remove MyceliumCore from the previous head tile, replacing with Mycelium.
+	/// </summary>
+	private void ClearHeadCoreTile()
+	{
+		if (_headCoreTile.X == -99999) return;
+
+		long key = PackCoords(_headCoreTile.X, _headCoreTile.Y);
+
+		// Only clear if it's still MyceliumCore (something else may have changed it)
+		TileType current = _chunkManager.GetTileAt(_headCoreTile.X, _headCoreTile.Y);
+		if (current == TileType.MyceliumCore)
+		{
+			_chunkManager.SetTileAt(_headCoreTile.X, _headCoreTile.Y, TileType.Mycelium);
+		}
+
+		_headCoreTile = (-99999, -99999);
 	}
 
 	// =========================================================================

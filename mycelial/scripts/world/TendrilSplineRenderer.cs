@@ -81,6 +81,7 @@ public partial class TendrilSplineRenderer : Node2D
 	{
 		_line = new Line2D
 		{
+			Name = "Line2D",
 			Width = BaseWidth,
 			JointMode = Line2D.LineJointMode.Round,
 			BeginCapMode = Line2D.LineCapMode.Round,

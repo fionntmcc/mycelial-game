@@ -16,6 +16,9 @@
 [node name="Camera2D" type="Camera2D" parent="." unique_id=1324047441]
 script = ExtResource("1_71j4m")
 TendrilControllerPath = NodePath("../TendrilController")
+DefaultZoom = 1.7
+SpeedZoomOutAmount = 0.45
+MaxShakeAmplitude = 15.0
 
 [node name="ChunkManager" type="Node2D" parent="." unique_id=23384488]
 script = ExtResource("2_k0juu")
