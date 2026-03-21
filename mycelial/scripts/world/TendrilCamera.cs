@@ -7,6 +7,10 @@ using Godot;
 /// Scroll to zoom in/out. The camera smoothly lerps to the tendril position
 /// so movement feels fluid, not jerky.
 ///
+/// UPDATED: Now tracks the continuous pixel position from TendrilHead
+/// instead of the old tile-based position. This gives smoother camera
+/// movement that matches the fluid tendril physics.
+///
 /// SETUP:
 ///   - Attach to a Camera2D node
 ///   - Assign TendrilControllerPath to your TendrilController node
@@ -17,7 +21,7 @@ public partial class TendrilCamera : Camera2D
 	[Export] public NodePath TendrilControllerPath { get; set; }
 	[Export] public bool PixelPerfectMode = true;
 
-	[Export] public float FollowSpeed = 8.0f;   // How fast camera catches up (higher = snappier)
+	[Export] public float FollowSpeed = 8.0f;
 	[Export] public float ZoomSpeed = 0.1f;
 	[Export] public float MinZoom = 0.2f;
 	[Export] public float MaxZoom = 4.0f;
@@ -47,7 +51,6 @@ public partial class TendrilCamera : Camera2D
 
 		if (_tendril != null)
 		{
-			// Start at tree center until tendril initializes
 			_targetPosition = new Vector2(
 				WorldConfig.TreeWorldX * WorldConfig.TileSize,
 				0
@@ -60,7 +63,7 @@ public partial class TendrilCamera : Camera2D
 	{
 		if (_tendril == null) return;
 
-		// Target the tendril head position
+		// Track the continuous pixel position (smooth, not tile-snapped)
 		_targetPosition = _tendril.GetHeadPixelPosition();
 
 		// Smooth follow
@@ -81,7 +84,6 @@ public partial class TendrilCamera : Camera2D
 
 	public override void _UnhandledInput(InputEvent @event)
 	{
-		// Zoom with scroll wheel
 		if (@event is InputEventMouseButton mouseEvent && mouseEvent.Pressed)
 		{
 			if (PixelPerfectMode)

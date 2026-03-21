@@ -9,6 +9,7 @@
 [ext_resource type="Script" uid="uid://dxnlmlkid3lvv" path="res://scripts/world/PassiveCorruption.cs" id="7_4mrxx"]
 [ext_resource type="Script" uid="uid://62mqlvkcqfkw" path="res://scripts/world/CreatureManager.cs" id="8_4mrxx"]
 [ext_resource type="Script" uid="uid://c85h8iums8xao" path="res://scripts/world/FogOfWar.cs" id="9_fog01"]
+[ext_resource type="Script" uid="uid://b274d7dh216dp" path="res://scripts/debug/TendrilDebugOverlay.cs" id="10_w7kh3"]
 
 [node name="World" type="Node2D" unique_id=185312821]
 
@@ -32,12 +33,7 @@ ChunkManagerPath = NodePath("../ChunkManager")
 [node name="TendrilController" type="Node2D" parent="." unique_id=1420415883]
 script = ExtResource("5_qfnet")
 ChunkManagerPath = NodePath("../ChunkManager")
-HungerPerMove = 2.0
-HungerPerHardMove = 4.0
-HungerOnCorrupted = 0.0
 HungerRegenOnCorrupted = 4.0
-MomentumAcceleration = 2.0
-MomentumDrag = 2.0
 
 [node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
 script = ExtResource("7_4mrxx")
@@ -58,4 +54,8 @@ TendrilControllerPath = NodePath("../TendrilController")
 [node name="CreatureManager" type="Node2D" parent="CreatureManager" unique_id=1653449213]
 script = ExtResource("8_4mrxx")
 ChunkManagerPath = NodePath("../ChunkManager")
+TendrilControllerPath = NodePath("../TendrilController")
+
+[node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=145948951]
+script = ExtResource("10_w7kh3")
 TendrilControllerPath = NodePath("../TendrilController")
