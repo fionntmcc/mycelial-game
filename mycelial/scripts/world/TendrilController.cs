@@ -5,65 +5,50 @@ using System.Collections.Generic;
 using Mycorrhiza.Data;
 
 /// <summary>
-/// Player-controlled mycelium tendril — orchestrator for the continuous movement system.
+/// Player-controlled mycelium tendril with organic sub-grid movement.
 ///
-/// This is the rewritten controller that delegates physics to TendrilHead,
-/// rendering to TendrilSplineRenderer, and tile conversion to TendrilInfection.
+/// The tendril lives on a fine sub-grid (4× terrain resolution) for smooth, creepy
+/// movement that isn't locked to terrain tiles. The sub-grid is a visual overlay —
+/// all gameplay interactions (hunger, creatures, territory) still work on terrain tiles.
 ///
-/// WHAT THIS CLASS DOES:
-///   - Hunger management (drain, regen, starvation → retreat)
-///   - Retreat and regeneration state machine
-///   - Root spread system (unchanged from original)
-///   - Signal emission for HUD, camera, creatures, fog-of-war
-///   - Claimed territory tracking
+/// ARCHITECTURE:
+///   - Movement happens in sub-grid coordinates (4px steps instead of 16px)
+///   - The head is an organic blob rendered on the sub-grid (see TendrilRenderer)
+///   - When the blob enters a new terrain tile, gameplay effects trigger (hunger, claiming)
+///   - Retreat walks back along the sub-grid trail for smooth reversal
+///   - Root spread still operates on terrain tiles
 ///
-/// WHAT IT DELEGATES:
-///   - Movement physics → TendrilHead
-///   - Visual trail → TendrilSplineRenderer
-///   - Tile infection → TendrilInfection
-///
-/// BACKWARD COMPATIBILITY:
-///   HeadX, HeadY, ClaimedTiles, PackCoords, IsOnTerritory, OverlapsHead,
-///   AddHunger, DrainHunger, GetHeadPixelPosition all work exactly as before.
-///   External systems (CreatureManager, FogOfWar, PassiveCorruption, TendrilHUD)
-///   require NO changes.
-///
-/// SETUP:
-///   - Assign ChunkManagerPath in inspector
-///   - TendrilHead, TendrilSplineRenderer are created as child nodes
-///   - TendrilInfection is created programmatically
+/// The sub-grid position (_subHeadX, _subHeadY) is the source of truth.
+/// HeadX/HeadY are derived terrain-tile coordinates for backward compatibility
+/// with CreatureManager, FogOfWar, PassiveCorruption, etc.
 /// </summary>
 public partial class TendrilController : Node2D
 {
 	[Export] public NodePath ChunkManagerPath { get; set; }
 
-	// =========================================================================
-	//  HUNGER CONFIG
-	// =========================================================================
-
-	[ExportGroup("Hunger")]
+	// --- Hunger Config ---
 	[Export] public float MaxHunger = 100f;
-
-	/// <summary>Base hunger drain per second while moving through normal soil.</summary>
-	[Export] public float HungerDrainPerSecond = 6f;
-
-	/// <summary>Hunger drain multiplier for hard tiles (clay, gravel).</summary>
-	[Export] public float HardTileDrainMultiplier = 2.5f;
-
-	/// <summary>Hunger drain when on own territory (very low — territory is cheap to retrace).</summary>
-	[Export] public float HungerDrainOnTerritory = 1.0f;
-
-	/// <summary>Passive hunger regen per second when stationary on corrupted land.</summary>
+	[Export] public float HungerPerMove = 0.8f;
+	[Export] public float HungerPerHardMove = 2.5f;
+	[Export] public float HungerOnCorrupted = 0.2f;
 	[Export] public float HungerRegenOnCorrupted = 0.8f;
 
-	[ExportGroup("Retreat")]
+	// --- Movement Config ---
+	[Export] public float MoveDelay = 0.08f;
 	[Export] public float RetreatSpeed = 0.03f;
+	[Export] public float MomentumAcceleration = 8.0f;
+	[Export] public float MomentumSteering = 14.0f;
+	[Export] public float MomentumTurnAroundBrake = 10.0f;
+	[Export] public float MomentumReverseLockThreshold = -0.55f;
+	[Export] public float MomentumDrag = 3.2f;
+	[Export] public float MomentumDeadZone = 0.08f;
+	[Export] public float ControllerDeadZone = 0.22f;
+	[Export] public float MinMoveDelayMultiplier = 0.58f;
+	[Export] public float MaxMoveDelayMultiplier = 1.0f;
+	[Export] public float BlockedMomentumDamping = 0.45f;
+	[Export] public int MaxSubStepsPerFrame = 8;
 
-	// =========================================================================
-	//  ROOT SPREAD CONFIG (unchanged from original)
-	// =========================================================================
-
-	[ExportGroup("Root Spread")]
+	// --- Root Spread Config ---
 	[Export] public bool EnableRootSpread = true;
 	[Export] public float RootSpreadInterval = 0.9f;
 	[Export] public int RootGrowthStepsPerTick = 3;
@@ -76,44 +61,137 @@ public partial class TendrilController : Node2D
 	[Export] public int RootMinLength = 8;
 	[Export] public int RootMaxLength = 22;
 
-	// Root spawn offsets relative to head tile
+	// --- Sub-Grid Blob Config ---
+	/// <summary>Base radius of the organic head blob in sub-cells.</summary>
+	[Export] public int BlobBaseRadius = 5;
+
+	/// <summary>How much noise distorts the blob edge (in sub-cells).</summary>
+	[Export] public float BlobNoiseAmplitude = 2.2f;
+
+	/// <summary>Frequency of the blob edge noise. Higher = more jagged.</summary>
+	[Export] public float BlobNoiseFrequency = 2.8f;
+
+	/// <summary>How much the blob stretches in the movement direction (multiplier).</summary>
+	[Export] public float BlobStretchFactor = 0.45f;
+
+	/// <summary>Speed of the blob shape animation (makes it pulse/shift).</summary>
+	[Export] public float BlobAnimSpeed = 1.8f;
+
+	// --- Quasi-Periodic Wobble ---
+	// The head drifts off-center with a wobble that never repeats.
+	// Sum of sine waves with irrational frequency ratios.
+	/// <summary>Max wobble offset in sub-cells. 0 = disabled.</summary>
+	[Export] public float WobbleAmplitude = 3.5f;
+
+	/// <summary>Overall speed of the wobble oscillation.</summary>
+	[Export] public float WobbleSpeed = 1.0f;
+
+	// =========================================================================
+	//  ROOT TIP GROWTH (same structures as before — operates on terrain tiles)
+	// =========================================================================
+
+	// Root sprout offsets — in sub-grid coordinates, relative to head.
+	// These are the original terrain-tile offsets × SubGridScale (4).
+	private const int _S = WorldConfig.SubGridScale; // 4
 	private static readonly (int dx, int dy)[] RootSpawnOffsets = new[]
 	{
-		(-1, 0), (-1, 1), (-1, 2),
-		(3, 0), (3, 1), (3, 2),
-		(0, 3), (1, 3), (2, 3),
+		(-_S, 0),       (-_S, _S),       (-_S, 2 * _S),
+		(3 * _S, 0),    (3 * _S, _S),    (3 * _S, 2 * _S),
+		(0, 3 * _S),    (_S, 3 * _S),    (2 * _S, 3 * _S),
 	};
 
 	private struct RootTip
 	{
-		public int X, Y;
-		public int DirX, DirY;
-		public int Length, MaxLength;
+		public int X;
+		public int Y;
+		public int DirX;
+		public int DirY;
+		public int Length;
+		public int MaxLength;
 		public int StuckSteps;
 	}
 
 	// =========================================================================
-	//  PUBLIC STATE — Backward-compatible API
+	//  STATE
 	// =========================================================================
 
-	/// <summary>Tile X of the head (backward compat for creatures, fog, etc.).</summary>
-	public int HeadX => _head != null ? _head.CurrentTile.X : _fallbackHeadX;
+	private ChunkManager _chunkManager;
 
-	/// <summary>Tile Y of the head.</summary>
-	public int HeadY => _head != null ? _head.CurrentTile.Y : _fallbackHeadY;
+	// --- Sub-Grid Position (source of truth) ---
+	private int _subHeadX;
+	private int _subHeadY;
+
+	/// <summary>
+	/// The sub-grid data — public so TendrilRenderer can read it.
+	/// Contains all sub-cells the tendril has touched.
+	/// </summary>
+	public SubGridData SubGrid { get; private set; } = new();
+
+	/// <summary>Terrain-tile X coordinate of the head (derived from sub-grid).</summary>
+	public int HeadX => FloorDiv(_subHeadX, WorldConfig.SubGridScale);
+
+	/// <summary>Terrain-tile Y coordinate of the head (derived from sub-grid).</summary>
+	public int HeadY => FloorDiv(_subHeadY, WorldConfig.SubGridScale);
+
+	/// <summary>Floor division that works correctly for negative values.</summary>
+	private static int FloorDiv(int a, int b)
+		=> a >= 0 ? a / b : (a - b + 1) / b;
+
+	/// <summary>Sub-grid X coordinate of the head center.</summary>
+	public int SubHeadX => _subHeadX;
+
+	/// <summary>Sub-grid Y coordinate of the head center.</summary>
+	public int SubHeadY => _subHeadY;
 
 	public float Hunger { get; private set; }
 	public bool IsRetreating { get; private set; }
 	public bool IsRegenerating { get; private set; }
 
+	// Trail: sub-grid positions (most recent first) for retreat path.
+	// Only records one entry per terrain tile crossing to keep retreat smooth
+	// but not excessively granular.
+	private readonly List<(int SubX, int SubY)> _subTrail = new();
+
+	// Sub-grid cells currently occupied by the core blob (for transitioning to trail).
+	private readonly List<(int X, int Y)> _currentCoreCells = new();
+
+	// Terrain tiles claimed by the tendril (same as before).
+	private readonly HashSet<long> _claimedTiles = new();
+	private readonly HashSet<long> _treeTiles = new();
+
+	// Movement state
+	private Vector2 _moveAccumulator = Vector2.Zero;
+	private Vector2 _momentum = Vector2.Zero;
+	private float _retreatTimer;
+	private float _regenTimer;
+	private float _rootSpreadTimer;
+	private int _tilesSinceLastRootSpawn;
+	private int _nextRootSpawnDistance;
+	private List<(int X, int Y)> _rootTips;
+	private int _currentRootTipIdx;
+	private Vector2 _lastMoveDir = new Vector2(0, 1); // Continuous direction (not grid-locked)
+	private readonly List<RootTip> _activeRootTips = new();
+	private readonly System.Random _rng = new();
+
+	// Blob animation
+	private FastNoiseLite _blobNoise;
+	private float _blobAnimTime;
+	private float _wobbleTime;
+	private ushort _trailAgeCounter;
+
+	// Track which terrain tile we last entered (to trigger gameplay effects once per tile)
+	private int _lastTerrainX;
+	private int _lastTerrainY;
+
+	// Sub-trail: record every N sub-steps for smooth retreat rendering
+	private int _subStepsSinceTrailRecord;
+	private const int SubStepsPerTrailRecord = 2;
+
 	public int ClaimedTileCount => _claimedTiles.Count;
 	public HashSet<long> ClaimedTiles => _claimedTiles;
 
-	/// <summary>Pixel position of the head (for camera, new systems).</summary>
-	public Vector2 HeadPixelPosition => _head?.HeadPosition ?? GetFallbackPixelPos();
-
 	// =========================================================================
-	//  SIGNALS — Same signatures as before
+	//  SIGNALS
 	// =========================================================================
 
 	[Signal] public delegate void HungerChangedEventHandler(float current, float max);
@@ -121,48 +199,6 @@ public partial class TendrilController : Node2D
 	[Signal] public delegate void RetreatStartedEventHandler();
 	[Signal] public delegate void RetreatEndedEventHandler();
 	[Signal] public delegate void TileConsumedEventHandler(int x, int y, float hungerGain);
-
-	// =========================================================================
-	//  INTERNAL STATE
-	// =========================================================================
-
-	private ChunkManager _chunkManager;
-
-	// New subsystems
-	private TendrilHead _head;
-	private TendrilSplineRenderer _splineRenderer;
-	private TendrilInfection _infection;
-
-	// Territory tracking (shared with infection system)
-	private readonly HashSet<long> _claimedTiles = new();
-	private readonly HashSet<long> _treeTiles = new();
-	private readonly Dictionary<long, TileType> _originalTiles = new();
-
-	// Root spread state
-	private readonly List<RootTip> _activeRootTips = new();
-	private float _rootSpreadTimer;
-	private int _tilesSinceLastRootSpawn;
-	private int _nextRootSpawnDistance;
-
-	// Spawn points
-	private List<(int X, int Y)> _rootTips;
-	private int _currentRootTipIdx;
-
-	// Retreat state
-	private float _retreatTimer;
-	private float _regenTimer;
-
-	// Track last tile position for root spawn triggering
-	private (int X, int Y) _lastTileForRoots;
-
-	// Track which tile currently displays MyceliumCore (the visual head marker)
-	private (int X, int Y) _headCoreTile = (-99999, -99999);
-
-	// Fallback position before head initializes
-	private int _fallbackHeadX;
-	private int _fallbackHeadY;
-
-	private readonly System.Random _rng = new();
 
 	// =========================================================================
 	//  LIFECYCLE
@@ -179,17 +215,11 @@ public partial class TendrilController : Node2D
 			return;
 		}
 
-		// --- Create subsystems as child nodes ---
-		_head = new TendrilHead { Name = "TendrilHead" };
-		AddChild(_head);
-
-		_splineRenderer = new TendrilSplineRenderer { Name = "TendrilSplineRenderer" };
-		AddChild(_splineRenderer);
-
-		_infection = new TendrilInfection { Name = "TendrilInfection" };
-		AddChild(_infection);
-		_infection.Initialize(_chunkManager, _claimedTiles, _treeTiles, _originalTiles);
-		_infection.TileInfected += OnTileInfected;
+		// Initialize blob noise for organic head shape
+		_blobNoise = new FastNoiseLite();
+		_blobNoise.NoiseType = FastNoiseLite.NoiseTypeEnum.Simplex;
+		_blobNoise.Frequency = 0.5f; // Adjusted at sample time
+		_blobNoise.Seed = _rng.Next();
 
 		Hunger = MaxHunger;
 		CallDeferred(nameof(Initialize));
@@ -207,7 +237,8 @@ public partial class TendrilController : Node2D
 		RegisterTreeTiles();
 		_currentRootTipIdx = 0;
 		SpawnAtRootTip(_currentRootTipIdx);
-		GD.Print($"Tendril spawned at ({HeadX}, {HeadY}) — continuous movement active.");
+		GD.Print($"Tendril spawned at sub-grid ({_subHeadX}, {_subHeadY}), " +
+				 $"terrain ({HeadX}, {HeadY}). Blob radius: {BlobBaseRadius} sub-cells.");
 	}
 
 	private void SpawnAtRootTip(int idx)
@@ -215,44 +246,41 @@ public partial class TendrilController : Node2D
 		if (idx >= _rootTips.Count) idx = 0;
 		var (tileX, tileY) = _rootTips[idx];
 
-		// Clear previous head marker if it exists
-		ClearHeadCoreTile();
-
-		_fallbackHeadX = tileX;
-		_fallbackHeadY = tileY;
-
-		Vector2 pixelPos = TendrilHead.TileToPixel(tileX, tileY);
-		_head.Initialize(_chunkManager, pixelPos, Mathf.Pi * 0.5f); // Facing down
+		// Convert terrain tile position to sub-grid center
+		int scale = WorldConfig.SubGridScale;
+		_subHeadX = tileX * scale + scale / 2;
+		_subHeadY = tileY * scale + scale / 2;
+		_lastTerrainX = HeadX;
+		_lastTerrainY = HeadY;
 
 		Hunger = MaxHunger;
 		IsRetreating = false;
 		IsRegenerating = false;
-
-		_splineRenderer.ClearTrail();
-		_infection.Reset();
-
+		_subTrail.Clear();
+		_currentCoreCells.Clear();
 		_activeRootTips.Clear();
 		_rootSpreadTimer = 0f;
 		_tilesSinceLastRootSpawn = 0;
-		_lastTileForRoots = (tileX, tileY);
+		_trailAgeCounter = 0;
+		_subStepsSinceTrailRecord = 0;
+		SubGrid.Clear();
 		ScheduleNextRootSpawnDistance();
 
-		// Place initial head marker
-		PlaceHeadCoreTile(tileX, tileY);
+		// Place initial blob and claim the starting terrain tile
+		PlaceBlob();
+		ClaimTerrainTile(HeadX, HeadY);
 
 		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
 		EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
 	}
 
-	// =========================================================================
-	//  MAIN LOOP
-	// =========================================================================
-
 	public override void _Process(double delta)
 	{
-		if (_chunkManager == null || _head == null) return;
+		if (_chunkManager == null) return;
 
 		float dt = (float)delta;
+		_blobAnimTime += dt * BlobAnimSpeed;
+		_wobbleTime += dt * WobbleSpeed;
 
 		if (IsRegenerating)
 		{
@@ -266,90 +294,344 @@ public partial class TendrilController : Node2D
 			return;
 		}
 
-		// --- 1. Update head physics ---
-		_head.Update(dt);
-
-		// --- 1b. Move MyceliumCore marker to current head tile ---
-		UpdateHeadCoreTile();
-
-		// --- 2. Record trail for spline renderer ---
-		_splineRenderer.RecordPoint(_head.HeadPosition, _head.Speed);
-		_splineRenderer.UpdateRenderer(dt, _head.HeadPosition);
-
-		// --- 3. Infection (exposure-based tile conversion) ---
-		float hungerGained = _infection.Update(dt, _head.HeadPosition, _head.Speed);
-		if (hungerGained > 0f)
-			Hunger = System.Math.Min(MaxHunger, Hunger + hungerGained);
-
-		// --- 4. Hunger drain (continuous, speed-based) ---
-		if (_head.Speed > _head.DeadZoneSpeed)
+		// Passive hunger regen when stationary on corrupted land
+		if (_claimedTiles.Contains(PackCoords(HeadX, HeadY)))
 		{
-			float drain = GetMovementHungerDrain();
-			Hunger -= drain * dt;
+			Hunger = System.Math.Min(MaxHunger, Hunger + HungerRegenOnCorrupted * dt);
+			EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
+		}
 
-			if (Hunger <= 0f)
+		ProcessMovement(dt);
+		ProcessRootSpread(dt);
+
+		// Age fresh trail cells into settled trail
+		SubGrid.AgeFreshCells(_trailAgeCounter, 30);
+	}
+
+	// =========================================================================
+	//  MOVEMENT — operates on sub-grid coordinates
+	// =========================================================================
+
+	private void ProcessMovement(float dt)
+	{
+		Vector2 input = GetMovementInputVector();
+
+		if (input != Vector2.Zero)
+		{
+			Vector2 inputDir = input.Normalized();
+
+			if (_momentum == Vector2.Zero)
 			{
-				Hunger = 0f;
-				StartRetreat();
-				EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
-				return;
+				_momentum = _momentum.MoveToward(input, MomentumAcceleration * dt);
+			}
+			else
+			{
+				Vector2 momentumDir = _momentum.Normalized();
+				float alignment = momentumDir.Dot(inputDir);
+
+				if (alignment <= MomentumReverseLockThreshold)
+				{
+					// Heavy brake before reversing direction
+					_momentum = _momentum.MoveToward(Vector2.Zero, MomentumTurnAroundBrake * dt);
+
+					if (_momentum.Length() <= MomentumDeadZone * 1.25f)
+						_momentum = _momentum.MoveToward(input, MomentumAcceleration * dt);
+				}
+				else
+				{
+					float fromAngle = Mathf.Atan2(momentumDir.Y, momentumDir.X);
+					float toAngle = Mathf.Atan2(inputDir.Y, inputDir.X);
+					float steerT = Mathf.Clamp(MomentumSteering * dt, 0f, 1f);
+					float steeredAngle = Mathf.LerpAngle(fromAngle, toAngle, steerT);
+					Vector2 steeredDir = new Vector2(Mathf.Cos(steeredAngle), Mathf.Sin(steeredAngle));
+
+					float targetMagnitude = input.Length();
+					float nextMagnitude = Mathf.MoveToward(_momentum.Length(), targetMagnitude, MomentumAcceleration * dt);
+					_momentum = steeredDir * nextMagnitude;
+				}
 			}
 		}
 		else
 		{
-			// Stationary on territory = passive regen
-			if (_claimedTiles.Contains(PackCoords(HeadX, HeadY)))
-				Hunger = System.Math.Min(MaxHunger, Hunger + HungerRegenOnCorrupted * dt);
+			_momentum = _momentum.MoveToward(Vector2.Zero, MomentumDrag * dt);
 		}
 
-		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
+		float speed = Mathf.Clamp(_momentum.Length(), 0f, 1f);
+		if (speed <= MomentumDeadZone)
+		{
+			if (input == Vector2.Zero)
+				_moveAccumulator = Vector2.Zero;
+			return;
+		}
+
+		// Update continuous direction for blob stretching
+		if (_momentum.Length() > MomentumDeadZone)
+			_lastMoveDir = _momentum.Normalized();
+
+		float delayMultiplier = Mathf.Lerp(MaxMoveDelayMultiplier, MinMoveDelayMultiplier, speed);
+		// Guard against misconfiguration. Floor is much lower than the terrain-grid
+		// version because sub-steps are 4× smaller, so we need 4× more of them.
+		float effectiveMoveDelay = Mathf.Max(0.005f, MoveDelay * delayMultiplier);
+		float stepsPerSecond = 1.0f / effectiveMoveDelay;
+		_moveAccumulator += _momentum * stepsPerSecond * dt;
+
+		// Each step is one sub-cell (4px), so we move more frequently than before.
+		// Allow more iterations per frame since sub-steps are smaller.
+		int iterations = 0;
+		while ((Mathf.Abs(_moveAccumulator.X) >= 1f || Mathf.Abs(_moveAccumulator.Y) >= 1f) && iterations < MaxSubStepsPerFrame)
+		{
+			iterations++;
+
+			int stepX = Mathf.Abs(_moveAccumulator.X) >= 1f ? System.Math.Sign(_moveAccumulator.X) : 0;
+			int stepY = Mathf.Abs(_moveAccumulator.Y) >= 1f ? System.Math.Sign(_moveAccumulator.Y) : 0;
+
+			bool moved = false;
+
+			// Try diagonal first
+			if (stepX != 0 || stepY != 0)
+			{
+				moved = TrySubMove(_subHeadX + stepX, _subHeadY + stepY);
+				if (moved)
+				{
+					if (stepX != 0) _moveAccumulator.X -= stepX;
+					if (stepY != 0) _moveAccumulator.Y -= stepY;
+					continue;
+				}
+			}
+
+			// Axis-separated fallback for wall glancing
+			if (stepX != 0)
+			{
+				moved = TrySubMove(_subHeadX + stepX, _subHeadY);
+				if (moved)
+				{
+					_moveAccumulator.X -= stepX;
+					continue;
+				}
+			}
+
+			if (stepY != 0)
+			{
+				moved = TrySubMove(_subHeadX, _subHeadY + stepY);
+				if (moved)
+				{
+					_moveAccumulator.Y -= stepY;
+					continue;
+				}
+			}
+
+			// Fully blocked
+			_moveAccumulator *= 0.35f;
+			_momentum *= BlockedMomentumDamping;
+			break;
+		}
+	}
+
+	/// <summary>
+	/// Attempt to move the head one sub-cell step to a new position.
+	/// Checks terrain passability and triggers gameplay effects when entering new tiles.
+	/// </summary>
+	private bool TrySubMove(int newSubX, int newSubY)
+	{
+		// Determine which terrain tile this sub-cell falls in
+		var (terrainX, terrainY) = SubGridData.SubToTerrain(newSubX, newSubY);
+
+		// Check terrain passability (only when entering a new terrain tile)
+		bool newTerrainTile = (terrainX != _lastTerrainX || terrainY != _lastTerrainY);
+
+		if (newTerrainTile)
+		{
+			TileType centerTile = _chunkManager.GetTileAt(terrainX, terrainY);
+
+			// Can't move through air
+			if (centerTile == TileType.Air)
+				return false;
+
+			// Can't move into unbreakable solids
+			if (TileProperties.Is(centerTile, TileFlags.Solid) && !TileProperties.Is(centerTile, TileFlags.Breakable))
+				return false;
+
+			if (TileProperties.Is(centerTile, TileFlags.Liquid))
+				return false;
+
+			if (TileProperties.Is(centerTile, TileFlags.Hazardous))
+				return false;
+
+			// Calculate hunger cost
+			bool isOwnTerritory = _claimedTiles.Contains(PackCoords(terrainX, terrainY));
+			float cost;
+
+			if (isOwnTerritory)
+				cost = HungerOnCorrupted;
+			else if (IsHardTile(centerTile))
+				cost = HungerPerHardMove;
+			else
+				cost = HungerPerMove;
+
+			if (Hunger - cost <= 0 && !isOwnTerritory)
+			{
+				StartRetreat();
+				return false;
+			}
+
+			// Calculate hunger gain from the terrain tile we're entering
+			float totalGain = 0f;
+			if (!_claimedTiles.Contains(PackCoords(terrainX, terrainY)))
+			{
+				TileType t = _chunkManager.GetTileAt(terrainX, terrainY);
+				totalGain = GetHungerGain(t);
+			}
+
+			// Apply hunger
+			Hunger = System.Math.Max(0, Hunger - cost);
+			Hunger = System.Math.Min(MaxHunger, Hunger + totalGain);
+
+			if (totalGain > 0)
+				EmitSignal(SignalName.TileConsumed, terrainX, terrainY, totalGain);
+
+			// Claim the new terrain tile
+			ClaimTerrainTile(terrainX, terrainY);
+
+			// Track distance for root spawning
+			TrackTravelAndSpawnRoots();
+
+			EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
+
+			if (Hunger <= 0)
+			{
+				StartRetreat();
+				return false;
+			}
+		}
+
+		// --- Move the sub-grid head ---
+
+		// Record trail position periodically for retreat
+		_subStepsSinceTrailRecord++;
+		if (_subStepsSinceTrailRecord >= SubStepsPerTrailRecord)
+		{
+			_subTrail.Insert(0, (_subHeadX, _subHeadY));
+			_subStepsSinceTrailRecord = 0;
+		}
+
+		// Demote old core cells to fresh trail
+		_trailAgeCounter++;
+		SubGrid.DemoteCoreToFresh(_currentCoreCells, _trailAgeCounter);
+
+		// Move head
+		_subHeadX = newSubX;
+		_subHeadY = newSubY;
+		_lastTerrainX = terrainX;
+		_lastTerrainY = terrainY;
+
+		// Place new organic blob
+		PlaceBlob();
+
+		// Emit terrain-coordinate signal for other systems
 		EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
 
-		// --- 5. Root spread tracking ---
-		TrackTravelAndSpawnRoots();
-		ProcessRootSpread(dt);
+		return true;
 	}
 
 	// =========================================================================
-	//  HUNGER DRAIN
+	//  ORGANIC BLOB — the creepy, pulsing head shape
 	// =========================================================================
 
-	private float GetMovementHungerDrain()
+	/// <summary>
+	/// Generate an organic blob shape on the sub-grid around the current head position.
+	/// Uses noise-modulated radius for irregular edges that shift over time.
+	/// The blob stretches slightly in the movement direction for a "reaching" look.
+	/// </summary>
+	private void PlaceBlob()
 	{
-		TileType tile = _chunkManager.GetTileAt(HeadX, HeadY);
+		_currentCoreCells.Clear();
 
-		if (_claimedTiles.Contains(PackCoords(HeadX, HeadY)))
-			return HungerDrainOnTerritory;
+		// Quasi-periodic wobble — sum of sines with irrational frequency ratios.
+		// Never repeats, always looks organic.
+		float t = _wobbleTime;
+		float wobbleX = WobbleAmplitude * (
+			Mathf.Sin(t * 1.0f) * 0.50f +
+			Mathf.Sin(t * 2.3f) * 0.30f +
+			Mathf.Sin(t * 0.7f) * 0.20f
+		);
+		float wobbleY = WobbleAmplitude * (
+			Mathf.Sin(t * 1.1f + 1.3f) * 0.45f +
+			Mathf.Sin(t * 1.9f + 0.7f) * 0.35f +
+			Mathf.Sin(t * 0.6f + 2.1f) * 0.20f
+		);
+		// Use different phase offsets on Y so the wobble traces a Lissajous-like path
 
-		if (IsHardTile(tile))
-			return HungerDrainPerSecond * HardTileDrainMultiplier;
+		int centerX = _subHeadX + (int)wobbleX;
+		int centerY = _subHeadY + (int)wobbleY;
 
-		return HungerDrainPerSecond;
-	}
+		int radius = BlobBaseRadius;
+		int scanRange = radius + (int)BlobNoiseAmplitude + (int)WobbleAmplitude + 2;
 
-	private static bool IsHardTile(TileType tile)
-	{
-		return tile == TileType.Clay || tile == TileType.Gravel || tile == TileType.Roots;
-	}
-
-	// =========================================================================
-	//  INFECTION CALLBACK
-	// =========================================================================
-
-	private void OnTileInfected(int tileX, int tileY, int originalTileType)
-	{
-		float gain = originalTileType switch
+		for (int dy = -scanRange; dy <= scanRange; dy++)
 		{
-			(int)TileType.Dirt => 2.0f,
-			(int)TileType.Leaf => 4.0f,
-			_ => 1.0f,
-		};
+			for (int dx = -scanRange; dx <= scanRange; dx++)
+			{
+				float dist = Mathf.Sqrt(dx * dx + dy * dy);
+				if (dist > scanRange) continue;
 
-		EmitSignal(SignalName.TileConsumed, tileX, tileY, gain);
+				// Calculate distorted radius at this angle
+				float angle = Mathf.Atan2(dy, dx);
+
+				// Noise-based edge distortion — samples shift with _blobAnimTime for pulsing
+				float noiseVal = _blobNoise.GetNoise2D(
+					angle * BlobNoiseFrequency + _blobAnimTime * 0.4f,
+					_blobAnimTime * 0.25f
+				);
+				float edgeRadius = radius + noiseVal * BlobNoiseAmplitude;
+
+				// Stretch in movement direction
+				float moveDot = dx * _lastMoveDir.X + dy * _lastMoveDir.Y;
+				if (moveDot > 0)
+					edgeRadius += moveDot * BlobStretchFactor;
+
+				// Small inner irregularity for texture
+				float innerNoise = _blobNoise.GetNoise2D(
+					dx * 0.8f + _blobAnimTime * 0.6f,
+					dy * 0.8f
+				);
+				edgeRadius += innerNoise * 0.6f;
+
+				if (dist <= edgeRadius)
+				{
+					int sx = centerX + dx;
+					int sy = centerY + dy;
+
+					// Intensity falls off toward edge for visual gradient
+					float edgeFade = 1f - Mathf.Clamp((dist / edgeRadius), 0f, 1f);
+					byte intensity = (byte)(edgeFade * 200 + 55);
+
+					SubGrid.SetCell(sx, sy, SubCellState.Core, 0, intensity);
+					_currentCoreCells.Add((sx, sy));
+				}
+			}
+		}
 	}
 
 	// =========================================================================
-	//  RETREAT — Animate backward along spline then regenerate
+	//  TERRAIN CLAIMING — tracks territory without modifying terrain tiles
+	// =========================================================================
+
+	/// <summary>
+	/// Mark a terrain tile as claimed territory for gameplay purposes.
+	/// The terrain is NOT visually modified — the tendril overlay lives
+	/// entirely on the sub-grid. This only updates the _claimedTiles set
+	/// used by hunger regen, creature interaction, and passive corruption.
+	/// </summary>
+	private void ClaimTerrainTile(int terrainX, int terrainY)
+	{
+		long key = PackCoords(terrainX, terrainY);
+		if (_treeTiles.Contains(key)) return;
+
+		_claimedTiles.Add(key);
+	}
+
+	// =========================================================================
+	//  RETREAT — walks back along the sub-grid trail
 	// =========================================================================
 
 	private void StartRetreat()
@@ -357,7 +639,6 @@ public partial class TendrilController : Node2D
 		if (IsRetreating) return;
 		IsRetreating = true;
 		_retreatTimer = 0;
-		ClearHeadCoreTile();
 		GD.Print("Tendril retreating!");
 		EmitSignal(SignalName.RetreatStarted);
 	}
@@ -368,26 +649,32 @@ public partial class TendrilController : Node2D
 		if (_retreatTimer > 0) return;
 		_retreatTimer = RetreatSpeed;
 
-		// Trim the spline trail from the tip (visual shrink)
-		if (!_splineRenderer.IsEmpty)
-		{
-			_splineRenderer.TrimFromBase(2);
-
-			// Move head toward base of trail
-			Vector2? basePos = _splineRenderer.GetBasePosition();
-			if (basePos.HasValue)
-			{
-				_head.Teleport(basePos.Value, _head.Heading);
-				EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
-			}
-		}
-
-		// When trail is exhausted, start regeneration
-		if (_splineRenderer.IsEmpty || _splineRenderer.PointCount < 3)
+		if (_subTrail.Count == 0)
 		{
 			StartRegeneration();
+			return;
 		}
+
+		// Demote current core to trail
+		SubGrid.DemoteCoreToFresh(_currentCoreCells, _trailAgeCounter++);
+
+		// Move head back along sub-trail
+		var (prevSubX, prevSubY) = _subTrail[0];
+		_subTrail.RemoveAt(0);
+		_subHeadX = prevSubX;
+		_subHeadY = prevSubY;
+		_lastTerrainX = HeadX;
+		_lastTerrainY = HeadY;
+
+		// Place blob at retreated position
+		PlaceBlob();
+
+		EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
 	}
+
+	// =========================================================================
+	//  REGENERATION — respawn at a root tip
+	// =========================================================================
 
 	private void StartRegeneration()
 	{
@@ -409,40 +696,28 @@ public partial class TendrilController : Node2D
 	}
 
 	// =========================================================================
-	//  ROOT SPREAD (preserved from original — operates on tile grid)
+	//  ROOT SPREAD — still operates on terrain tiles
 	// =========================================================================
 
 	private void TrackTravelAndSpawnRoots()
 	{
 		if (!EnableRootSpread) return;
+		if (_lastMoveDir.Y <= 0) return;
 
-		// Only spawn roots when moving downward
-		var currentTile = _head.CurrentTile;
-		if (currentTile.Y <= _lastTileForRoots.Y)
-		{
-			_lastTileForRoots = currentTile;
-			return;
-		}
+		_tilesSinceLastRootSpawn++;
+		if (_tilesSinceLastRootSpawn < _nextRootSpawnDistance) return;
 
-		int tilesMoved = System.Math.Abs(currentTile.Y - _lastTileForRoots.Y)
-					   + System.Math.Abs(currentTile.X - _lastTileForRoots.X);
-		_tilesSinceLastRootSpawn += tilesMoved;
-		_lastTileForRoots = currentTile;
-
-		if (_tilesSinceLastRootSpawn >= _nextRootSpawnDistance)
-		{
-			SpawnRootBurst();
-			_tilesSinceLastRootSpawn = 0;
-			ScheduleNextRootSpawnDistance();
-		}
+		SpawnRootBurst();
+		_tilesSinceLastRootSpawn = 0;
+		ScheduleNextRootSpawnDistance();
 	}
 
 	private void ScheduleNextRootSpawnDistance()
 	{
 		int jitter = System.Math.Max(0, RootSpawnIntervalJitter);
-		int min = System.Math.Max(1, RootSpawnEveryTiles - jitter);
-		int max = System.Math.Max(min, RootSpawnEveryTiles + jitter);
-		_nextRootSpawnDistance = _rng.Next(min, max + 1);
+		int minDistance = System.Math.Max(1, RootSpawnEveryTiles - jitter);
+		int maxDistance = System.Math.Max(minDistance, RootSpawnEveryTiles + jitter);
+		_nextRootSpawnDistance = _rng.Next(minDistance, maxDistance + 1);
 	}
 
 	private void SpawnRootBurst()
@@ -451,14 +726,16 @@ public partial class TendrilController : Node2D
 
 		int burstMin = System.Math.Max(1, RootSpawnBurstMin);
 		int burstMax = System.Math.Max(burstMin, RootSpawnBurstMax);
-		int desired = _rng.Next(burstMin, burstMax + 1);
+		int desiredCount = _rng.Next(burstMin, burstMax + 1);
 		int available = MaxActiveRoots - _activeRootTips.Count;
-		int spawnCount = System.Math.Min(desired, available);
+		int spawnCount = System.Math.Min(desiredCount, available);
 		if (spawnCount <= 0) return;
 
 		int spawned = 0;
 		int attempts = 0;
-		while (spawned < spawnCount && attempts < spawnCount * 6)
+		int maxAttempts = spawnCount * 6;
+
+		while (spawned < spawnCount && attempts < maxAttempts)
 		{
 			attempts++;
 			if (TrySpawnSingleRootTip())
@@ -471,23 +748,28 @@ public partial class TendrilController : Node2D
 		if (_activeRootTips.Count >= MaxActiveRoots) return false;
 
 		var offset = RootSpawnOffsets[_rng.Next(RootSpawnOffsets.Length)];
-		int startX = HeadX + offset.dx;
-		int startY = HeadY + offset.dy;
+		int startX = _subHeadX + offset.dx;
+		int startY = _subHeadY + offset.dy;
 
-		int dirX = offset.dx < 0 ? -1 : (offset.dx > 2 ? 1 : (_rng.Next(3) - 1));
+		int dirX = offset.dx < 0 ? -1 : (offset.dx > 2 * _S ? 1 : (_rng.Next(3) - 1));
 		int dirY = 1;
 
 		if (!TrySpreadRootInto(startX, startY)) return false;
 
-		int maxLength = RootMinLength;
-		if (RootMaxLength > RootMinLength)
-			maxLength += _rng.Next(RootMaxLength - RootMinLength + 1);
+		// Root lengths are in sub-grid steps (4× longer than terrain-tile lengths)
+		int maxLength = RootMinLength * WorldConfig.SubGridScale;
+		int range = (RootMaxLength - RootMinLength) * WorldConfig.SubGridScale;
+		if (range > 0)
+			maxLength += _rng.Next(range + 1);
 
 		_activeRootTips.Add(new RootTip
 		{
-			X = startX, Y = startY,
-			DirX = dirX, DirY = dirY,
-			Length = 1, MaxLength = maxLength,
+			X = startX,
+			Y = startY,
+			DirX = dirX,
+			DirY = dirY,
+			Length = 1,
+			MaxLength = maxLength,
 			StuckSteps = 0,
 		});
 
@@ -554,10 +836,13 @@ public partial class TendrilController : Node2D
 	private (int dirX, int dirY) ChooseNextRootDirection(RootTip tip)
 	{
 		int dirX = tip.DirX;
+
 		if (_rng.NextDouble() < 0.35f)
 			dirX += _rng.Next(3) - 1;
 
-		dirX = System.Math.Clamp(dirX, -1, 1);
+		if (dirX < -1) dirX = -1;
+		if (dirX > 1) dirX = 1;
+
 		if (dirX == 0 && _rng.NextDouble() < 0.25f)
 			dirX = _rng.Next(2) == 0 ? -1 : 1;
 
@@ -578,37 +863,165 @@ public partial class TendrilController : Node2D
 
 		if (!TrySpreadRootInto(branchX, branchY)) return;
 
-		int branchMaxLength = RootMinLength;
-		if (RootMaxLength > RootMinLength)
-			branchMaxLength += _rng.Next(RootMaxLength - RootMinLength + 1);
+		int branchMaxLength = RootMinLength * WorldConfig.SubGridScale;
+		int range = (RootMaxLength - RootMinLength) * WorldConfig.SubGridScale;
+		if (range > 0)
+			branchMaxLength += _rng.Next(range + 1);
 
 		_activeRootTips.Add(new RootTip
 		{
-			X = branchX, Y = branchY,
-			DirX = branchDirX, DirY = 1,
-			Length = 1, MaxLength = branchMaxLength,
+			X = branchX,
+			Y = branchY,
+			DirX = branchDirX,
+			DirY = 1,
+			Length = 1,
+			MaxLength = branchMaxLength,
 			StuckSteps = 0,
 		});
 	}
 
-	private bool TrySpreadRootInto(int x, int y)
+	/// <summary>
+	/// Try to grow a root into a sub-grid position.
+	/// Checks terrain passability, then places a Root cell on the sub-grid.
+	/// Does NOT modify terrain tiles.
+	/// </summary>
+	private bool TrySpreadRootInto(int subX, int subY)
 	{
-		long key = PackCoords(x, y);
-		if (_treeTiles.Contains(key)) return false;
+		// Already occupied on the sub-grid
+		if (SubGrid.HasCell(subX, subY)) return false;
 
-		TileType tile = _chunkManager.GetTileAt(x, y);
+		// Check terrain passability at this position
+		var (terrainX, terrainY) = SubGridData.SubToTerrain(subX, subY);
+		long terrainKey = PackCoords(terrainX, terrainY);
+		if (_treeTiles.Contains(terrainKey)) return false;
+
+		TileType tile = _chunkManager.GetTileAt(terrainX, terrainY);
 		if (TileProperties.Is(tile, TileFlags.Liquid)) return false;
+		if (tile == TileType.Air) return false;
 		if (TileProperties.Is(tile, TileFlags.Solid) && !TileProperties.Is(tile, TileFlags.Breakable))
 			return false;
 
-		if (tile != TileType.Mycelium)
-			_chunkManager.SetTileAt(x, y, TileType.Mycelium);
+		// Place root cell on sub-grid
+		byte intensity = (byte)(180 + _rng.Next(76)); // Slight variation
+		SubGrid.SetCell(subX, subY, SubCellState.Root, 0, intensity);
 
-		if (!_originalTiles.ContainsKey(key) && !TileProperties.IsMycelium(tile))
-			_originalTiles[key] = tile;
-
-		_claimedTiles.Add(key);
+		// Track territory on terrain grid for gameplay
+		_claimedTiles.Add(terrainKey);
 		return true;
+	}
+
+	// =========================================================================
+	//  INPUT
+	// =========================================================================
+
+	private Vector2 GetMovementInputVector()
+	{
+		int keyX = 0;
+		int keyY = 0;
+
+		if (Input.IsKeyPressed(Key.W) || Input.IsKeyPressed(Key.Up))
+			keyY -= 1;
+		if (Input.IsKeyPressed(Key.S) || Input.IsKeyPressed(Key.Down))
+			keyY += 1;
+		if (Input.IsKeyPressed(Key.A) || Input.IsKeyPressed(Key.Left))
+			keyX -= 1;
+		if (Input.IsKeyPressed(Key.D) || Input.IsKeyPressed(Key.Right))
+			keyX += 1;
+
+		Vector2 keyboard = new Vector2(keyX, keyY);
+		if (keyboard != Vector2.Zero)
+			keyboard = keyboard.Normalized();
+
+		Vector2 stick = Vector2.Zero;
+		var joypads = Input.GetConnectedJoypads();
+		if (joypads.Count > 0)
+		{
+			int joyId = joypads[0];
+			stick = new Vector2(
+				Input.GetJoyAxis(joyId, JoyAxis.LeftX),
+				Input.GetJoyAxis(joyId, JoyAxis.LeftY)
+			);
+
+			float len = stick.Length();
+			if (len < ControllerDeadZone)
+			{
+				stick = Vector2.Zero;
+			}
+			else if (len > 0f)
+			{
+				float normalizedLen = (len - ControllerDeadZone) / (1f - ControllerDeadZone);
+				normalizedLen = Mathf.Clamp(normalizedLen, 0f, 1f);
+				stick = stick.Normalized() * normalizedLen;
+			}
+		}
+
+		Vector2 combined = keyboard + stick;
+		if (combined.Length() > 1f)
+			combined = combined.Normalized();
+
+		return combined;
+	}
+
+	// =========================================================================
+	//  HUNGER
+	// =========================================================================
+
+	private static float GetHungerGain(TileType tile)
+	{
+		return tile switch
+		{
+			TileType.Dirt => 2.0f,
+			TileType.Sand => 1.0f,
+			TileType.Clay => 0.5f,
+			TileType.Leaf => 4.0f,
+			TileType.Roots => 6.0f,
+			TileType.RootTip => 8.0f,
+
+			TileType.GrassFloor or TileType.GrassCeiling
+			or TileType.GrassLWall or TileType.GrassRWall => 4.0f,
+
+			TileType.GrassInnerTL or TileType.GrassInnerTR
+			or TileType.GrassInnerBL or TileType.GrassInnerBR => 4.0f,
+
+			TileType.GrassOuterTL or TileType.GrassOuterTR
+			or TileType.GrassOuterBL or TileType.GrassOuterBR => 4.0f,
+
+			TileType.BoneMarrow => 15.0f,
+			TileType.AncientSporeNode => 20.0f,
+			TileType.CrystalGrotte => 12.0f,
+			TileType.BioluminescentVein => 8.0f,
+
+			TileType.Air => 0f,
+
+			TileType.Mycelium or TileType.MyceliumDense
+			or TileType.MyceliumDark or TileType.MyceliumCore
+			or TileType.InfectedDirt => 0f,
+
+			_ when TileProperties.IsInfectedGrass(tile) => 0f,
+
+			_ => TileProperties.Is(tile, TileFlags.Organic) ? 1.0f : 0f,
+		};
+	}
+
+	private static bool IsHardTile(TileType tile)
+	{
+		return tile == TileType.Clay || tile == TileType.Gravel
+			|| tile == TileType.Roots;
+	}
+
+	/// <summary>Add hunger from external source (e.g. consuming a creature).</summary>
+	public void AddHunger(float amount)
+	{
+		Hunger = System.Math.Min(MaxHunger, Hunger + amount);
+		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
+	}
+
+	/// <summary>Drain hunger from external source (e.g. creature attack).</summary>
+	public void DrainHunger(float amount)
+	{
+		Hunger = System.Math.Max(0, Hunger - amount);
+		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
+		if (Hunger <= 0) StartRetreat();
 	}
 
 	// =========================================================================
@@ -639,125 +1052,91 @@ public partial class TendrilController : Node2D
 	}
 
 	// =========================================================================
-	//  PUBLIC API — Backward compatible
+	//  PUBLIC API — all in terrain-tile coordinates for backward compatibility
 	// =========================================================================
 
-	/// <summary>Get the head's pixel position (for camera tracking).</summary>
+	/// <summary>
+	/// Get the head position in world pixels, using sub-grid for smooth positioning.
+	/// The camera should follow this for fluid tracking.
+	/// </summary>
 	public Vector2 GetHeadPixelPosition()
 	{
-		return _head?.HeadPosition ?? GetFallbackPixelPos();
+		int cellSize = WorldConfig.SubCellSize;
+		return new Vector2(
+			_subHeadX * cellSize + cellSize / 2f,
+			_subHeadY * cellSize + cellSize / 2f
+		);
 	}
 
-	/// <summary>Check if a world tile overlaps the tendril head area.</summary>
+	/// <summary>
+	/// Check if a world tile position overlaps the current tendril head blob.
+	/// Used by CreatureManager for collision detection.
+	/// </summary>
 	public bool OverlapsHead(int worldX, int worldY)
 	{
-		// With continuous head, check if the tile is within ~1 tile of the head
-		int dx = System.Math.Abs(worldX - HeadX);
-		int dy = System.Math.Abs(worldY - HeadY);
-		return dx <= 1 && dy <= 1;
+		// Check if any core sub-cells fall within this terrain tile
+		int scale = WorldConfig.SubGridScale;
+		int subMinX = worldX * scale;
+		int subMinY = worldY * scale;
+		int subMaxX = subMinX + scale - 1;
+		int subMaxY = subMinY + scale - 1;
+
+		foreach (var (sx, sy) in _currentCoreCells)
+		{
+			if (sx >= subMinX && sx <= subMaxX && sy >= subMinY && sy <= subMaxY)
+				return true;
+		}
+		return false;
 	}
 
-	/// <summary>Check if a world tile is on claimed mycelium territory.</summary>
+	/// <summary>Check if a world tile position is on claimed mycelium territory.</summary>
 	public bool IsOnTerritory(int worldX, int worldY)
 	{
 		return _claimedTiles.Contains(PackCoords(worldX, worldY));
 	}
 
-	/// <summary>Add hunger from external source (e.g. consuming a creature).</summary>
-	public void AddHunger(float amount)
-	{
-		Hunger = System.Math.Min(MaxHunger, Hunger + amount);
-		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
-	}
-
-	/// <summary>Drain hunger from external source (e.g. creature attack).</summary>
-	public void DrainHunger(float amount)
-	{
-		Hunger = System.Math.Max(0, Hunger - amount);
-		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
-		if (Hunger <= 0) StartRetreat();
-	}
-
-	// =========================================================================
-	//  HEAD CORE TILE — Visual marker at current head position
-	// =========================================================================
-
 	/// <summary>
-	/// Check if the head has moved to a new tile, and if so, move the
-	/// MyceliumCore marker: clear it from the old tile, place it on the new one.
+	/// Check if any sub-grid cells (trail/root) exist within a terrain tile.
+	/// Used by Grazer creatures to navigate toward tendril territory.
 	/// </summary>
-	private void UpdateHeadCoreTile()
+	public bool HasSubGridCellsInTile(int worldX, int worldY)
 	{
-		int hx = HeadX;
-		int hy = HeadY;
-
-		// Same tile — nothing to do
-		if (hx == _headCoreTile.X && hy == _headCoreTile.Y)
-			return;
-
-		// Clear old marker
-		ClearHeadCoreTile();
-
-		// Place new marker
-		PlaceHeadCoreTile(hx, hy);
+		return SubGrid.HasCellsInTerrainTile(worldX, worldY);
 	}
 
 	/// <summary>
-	/// Place MyceliumCore at the given tile, marking it as the head position.
+	/// Eat (remove) all sub-grid cells within a terrain tile and unclaim it.
+	/// Used by Grazer creatures to destroy tendril territory.
+	/// Returns true if any cells were actually eaten.
 	/// </summary>
-	private void PlaceHeadCoreTile(int tileX, int tileY)
+	public bool EatSubGridCellsInTile(int worldX, int worldY)
 	{
-		long key = PackCoords(tileX, tileY);
+		int scale = WorldConfig.SubGridScale;
+		int subMinX = worldX * scale;
+		int subMinY = worldY * scale;
+		bool ate = false;
 
-		// Don't overwrite tree tiles
-		if (_treeTiles.Contains(key))
+		for (int dy = 0; dy < scale; dy++)
 		{
-			_headCoreTile = (-99999, -99999);
-			return;
+			for (int dx = 0; dx < scale; dx++)
+			{
+				int sx = subMinX + dx;
+				int sy = subMinY + dy;
+				if (SubGrid.HasCell(sx, sy))
+				{
+					SubGrid.ClearCell(sx, sy);
+					ate = true;
+				}
+			}
 		}
 
-		TileType existing = _chunkManager.GetTileAt(tileX, tileY);
+		if (ate)
+			_claimedTiles.Remove(PackCoords(worldX, worldY));
 
-		// Record original tile if we haven't already
-		if (!_originalTiles.ContainsKey(key) && !TileProperties.IsMycelium(existing))
-			_originalTiles[key] = existing;
-
-		_chunkManager.SetTileAt(tileX, tileY, TileType.MyceliumCore);
-		_claimedTiles.Add(key);
-		_headCoreTile = (tileX, tileY);
+		return ate;
 	}
 
-	/// <summary>
-	/// Remove MyceliumCore from the previous head tile, replacing with Mycelium.
-	/// </summary>
-	private void ClearHeadCoreTile()
-	{
-		if (_headCoreTile.X == -99999) return;
-
-		long key = PackCoords(_headCoreTile.X, _headCoreTile.Y);
-
-		// Only clear if it's still MyceliumCore (something else may have changed it)
-		TileType current = _chunkManager.GetTileAt(_headCoreTile.X, _headCoreTile.Y);
-		if (current == TileType.MyceliumCore)
-		{
-			_chunkManager.SetTileAt(_headCoreTile.X, _headCoreTile.Y, TileType.Mycelium);
-		}
-
-		_headCoreTile = (-99999, -99999);
-	}
-
-	// =========================================================================
-	//  UTILITY
-	// =========================================================================
-
+	/// <summary>Pack terrain coordinates into a single long key.</summary>
 	public static long PackCoords(int x, int y)
 		=> ((long)(x + 65536) << 20) | (long)(y + 65536);
-
-	private Vector2 GetFallbackPixelPos()
-	{
-		return new Vector2(
-			_fallbackHeadX * WorldConfig.TileSize + WorldConfig.TileSize / 2f,
-			_fallbackHeadY * WorldConfig.TileSize + WorldConfig.TileSize / 2f
-		);
-	}
 }

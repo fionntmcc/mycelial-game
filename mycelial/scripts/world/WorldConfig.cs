@@ -11,6 +11,14 @@ public static class WorldConfig
 	public const int ChunkSize = 32;         // Tiles per chunk (both axes)
 	public const int ChunkPixelSize = ChunkSize * TileSize; // 512px
 
+	// --- Sub-Grid (Tendril Visual Layer) ---
+	// The tendril moves on a finer grid layered in front of the terrain.
+	// Each terrain tile maps to SubGridScale² sub-cells, giving the tendril
+	// smooth, organic movement that isn't locked to the 16px tile grid.
+	public const int SubGridScale = 4;                            // Sub-cells per terrain tile per axis
+	public const int SubCellSize = TileSize / SubGridScale;       // 4 pixels per sub-cell
+	public const int SubCellsPerTile = SubGridScale * SubGridScale; // 16 sub-cells per terrain tile
+
 	// --- World Dimensions (in tiles) ---
 	public const int WorldWidthTiles = 2048;  // ~64 chunks wide
 	public const int WorldDepthTiles = 1280;  // ~40 chunks deep

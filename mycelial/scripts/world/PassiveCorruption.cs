@@ -5,14 +5,17 @@ using System.Collections.Generic;
 using Mycorrhiza.Data;
 
 /// <summary>
-/// Handles slow passive spreading of mycelium from tiles the player has already claimed.
-/// This is the "territory hold" — corrupted land expands on its own, but much slower
-/// than the player's active tendril movement.
+/// Handles slow passive spreading of tendril sub-grid cells from territory
+/// the player has already claimed.
+///
+/// Now operates entirely on the sub-grid — terrain tiles are never modified.
+/// Spreads Trail cells outward from existing tendril cells, creating a creeping
+/// fungal mat that visually expands on its own.
 ///
 /// Algorithm:
-///   - Maintains a frontier of tiles adjacent to claimed territory
-///   - Every tick, converts a small number of frontier tiles to mycelium
-///   - Only spreads into organic tiles (not stone, water, etc.)
+///   - Maintains a frontier of sub-grid positions adjacent to existing cells
+///   - Every tick, places a small number of Trail cells at frontier positions
+///   - Only spreads into passable terrain (not stone, water, air)
 ///   - Spread rate is configurable and deliberately slow
 ///
 /// SETUP:
@@ -28,7 +31,7 @@ public partial class PassiveCorruption : Node2D
     /// <summary>Seconds between passive spread ticks.</summary>
     [Export] public float SpreadInterval = 0.2f;
 
-    /// <summary>Max tiles to spread per tick.</summary>
+    /// <summary>Max sub-cells to spread per tick.</summary>
     [Export] public int SpreadsPerTick = 8;
 
     private ChunkManager _chunkManager;
@@ -36,12 +39,12 @@ public partial class PassiveCorruption : Node2D
     private float _timer;
     private readonly System.Random _rng = new();
 
-    // Frontier for passive spread
+    // Frontier for passive spread — sub-grid coordinates
     private readonly List<(int X, int Y)> _frontier = new();
     private readonly HashSet<long> _frontierSet = new();
 
-    // Track what passive corruption has already processed
-    private int _lastKnownClaimedCount;
+    // Track what we've already processed
+    private int _lastKnownSubGridCount;
 
     public override void _Ready()
     {
@@ -57,7 +60,7 @@ public partial class PassiveCorruption : Node2D
 
         if (!EnablePassiveSpread)
         {
-            GD.Print("PassiveCorruption: Passive spread disabled. Tendril movement is the only spread source.");
+            GD.Print("PassiveCorruption: Passive spread disabled.");
         }
     }
 
@@ -66,11 +69,12 @@ public partial class PassiveCorruption : Node2D
         if (!EnablePassiveSpread) return;
         if (_chunkManager == null || _tendril == null) return;
 
-        // Refresh frontier when player claims new tiles
-        if (_tendril.ClaimedTileCount != _lastKnownClaimedCount)
+        // Refresh frontier when the sub-grid grows
+        int currentCount = _tendril.SubGrid.CellCount;
+        if (currentCount != _lastKnownSubGridCount)
         {
             RefreshFrontier();
-            _lastKnownClaimedCount = _tendril.ClaimedTileCount;
+            _lastKnownSubGridCount = currentCount;
         }
 
         _timer += (float)delta;
@@ -81,111 +85,110 @@ public partial class PassiveCorruption : Node2D
     }
 
     /// <summary>
-    /// Scan all claimed tiles and find organic neighbors that could be corrupted.
-    /// This is called when the claimed set changes (player moves).
+    /// Rebuild the frontier from all existing sub-grid cells.
+    /// Finds empty sub-grid neighbors that sit in passable terrain.
     /// </summary>
     private void RefreshFrontier()
     {
-        // We don't rebuild the whole frontier every time — just check new claimed tiles
-        // For efficiency, we scan a subset each frame
-        // Full rebuild is fine for now at this scale
-
         _frontier.Clear();
         _frontierSet.Clear();
 
-        foreach (long key in _tendril.ClaimedTiles)
-        {
-            // Unpack coordinates
-            int x = (int)((key >> 20) - 65536);
-            int y = (int)((key & 0xFFFFF) - 65536);
+        SubGridData subGrid = _tendril.SubGrid;
 
-            AddAdjacentToFrontier(x, y);
+        foreach (var (key, cell) in subGrid.Cells)
+        {
+            if (cell.State == SubCellState.Empty) continue;
+
+            // Only expand from settled trail and root cells (not active core/fresh)
+            if (cell.State != SubCellState.Trail && cell.State != SubCellState.Root)
+                continue;
+
+            var (x, y) = SubGridData.UnpackCoords(key);
+            AddAdjacentToFrontier(subGrid, x, y);
         }
     }
 
-    private void AddAdjacentToFrontier(int x, int y)
+    private void AddAdjacentToFrontier(SubGridData subGrid, int x, int y)
     {
         // Cardinals
-        TryAddToFrontier(x - 1, y);
-        TryAddToFrontier(x + 1, y);
-        TryAddToFrontier(x, y - 1);
-        TryAddToFrontier(x, y + 1);
+        TryAddToFrontier(subGrid, x - 1, y);
+        TryAddToFrontier(subGrid, x + 1, y);
+        TryAddToFrontier(subGrid, x, y - 1);
+        TryAddToFrontier(subGrid, x, y + 1);
 
-        // Diagonals so corruption flows across corner-connected grass too
-        TryAddToFrontier(x - 1, y - 1);
-        TryAddToFrontier(x + 1, y - 1);
-        TryAddToFrontier(x - 1, y + 1);
-        TryAddToFrontier(x + 1, y + 1);
+        // Diagonals (less often, for organic shape)
+        if (_rng.Next(3) == 0)
+        {
+            TryAddToFrontier(subGrid, x - 1, y - 1);
+            TryAddToFrontier(subGrid, x + 1, y - 1);
+            TryAddToFrontier(subGrid, x - 1, y + 1);
+            TryAddToFrontier(subGrid, x + 1, y + 1);
+        }
     }
 
-    private void TryAddToFrontier(int x, int y)
+    private void TryAddToFrontier(SubGridData subGrid, int subX, int subY)
     {
-        long key = TendrilController.PackCoords(x, y);
+        long key = SubGridData.PackCoords(subX, subY);
 
-        // Skip if already in frontier or already claimed
+        // Skip if already in frontier or already has a cell
         if (_frontierSet.Contains(key)) return;
-        if (_tendril.ClaimedTiles.Contains(key)) return;
+        if (subGrid.HasCell(subX, subY)) return;
 
-        TileType tile = _chunkManager.GetTileAt(x, y);
+        // Check terrain passability
+        var (terrainX, terrainY) = SubGridData.SubToTerrain(subX, subY);
+        TileType tile = _chunkManager.GetTileAt(terrainX, terrainY);
 
-        // Skip if already infected
-        if (TileProperties.IsMycelium(tile)) return;
-
-        // Grass-only conversion rule: only normal grass can be added.
-        if (!TileProperties.IsGrass(tile)) return;
-
-        // Candidate grass must touch existing corruption (mycelium or infected grass).
-        if (!HasAdjacentCorruption(x, y)) return;
+        // Can only spread into organic/breakable solid terrain
+        if (tile == TileType.Air) return;
+        if (TileProperties.Is(tile, TileFlags.Liquid)) return;
+        if (TileProperties.Is(tile, TileFlags.Solid) && !TileProperties.Is(tile, TileFlags.Breakable))
+            return;
 
         _frontierSet.Add(key);
-        _frontier.Add((x, y));
-    }
-
-    private bool HasAdjacentCorruption(int x, int y)
-    {
-        return TileProperties.IsMycelium(_chunkManager.GetTileAt(x - 1, y))
-            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x + 1, y))
-            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x, y - 1))
-            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x, y + 1))
-            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x - 1, y - 1))
-            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x + 1, y - 1))
-            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x - 1, y + 1))
-            || TileProperties.IsMycelium(_chunkManager.GetTileAt(x + 1, y + 1));
+        _frontier.Add((subX, subY));
     }
 
     private void SpreadTick()
     {
         if (_frontier.Count == 0) return;
 
+        SubGridData subGrid = _tendril.SubGrid;
         int count = System.Math.Min(SpreadsPerTick, _frontier.Count);
 
         for (int i = 0; i < count; i++)
         {
             if (_frontier.Count == 0) break;
 
-            // Pick a random frontier tile
+            // Pick a random frontier cell
             int idx = _rng.Next(_frontier.Count);
-            var (x, y) = _frontier[idx];
+            var (subX, subY) = _frontier[idx];
 
             // Swap-remove
             int lastIdx = _frontier.Count - 1;
             _frontier[idx] = _frontier[lastIdx];
             _frontier.RemoveAt(lastIdx);
-            _frontierSet.Remove(TendrilController.PackCoords(x, y));
+            _frontierSet.Remove(SubGridData.PackCoords(subX, subY));
 
-            // Verify tile is still valid
-            TileType tile = _chunkManager.GetTileAt(x, y);
-            if (TileProperties.IsMycelium(tile)) continue;
-            if (!TileProperties.IsGrass(tile)) continue;
-            if (!HasAdjacentCorruption(x, y)) continue;
+            // Verify still valid
+            if (subGrid.HasCell(subX, subY)) continue;
 
-            // Terrain-aware corruption: grass becomes infected grass, dirt becomes infected dirt
-            TileType infectedTile = TileProperties.GetInfectedVariant(tile);
-            _chunkManager.SetTileAt(x, y, infectedTile);
-            _tendril.ClaimedTiles.Add(TendrilController.PackCoords(x, y));
+            var (terrainX, terrainY) = SubGridData.SubToTerrain(subX, subY);
+            TileType tile = _chunkManager.GetTileAt(terrainX, terrainY);
+            if (tile == TileType.Air) continue;
+            if (TileProperties.Is(tile, TileFlags.Liquid)) continue;
+            if (TileProperties.Is(tile, TileFlags.Solid) && !TileProperties.Is(tile, TileFlags.Breakable))
+                continue;
 
-            // Add its neighbors to frontier
-            AddAdjacentToFrontier(x, y);
+            // Place a trail cell on the sub-grid
+            byte intensity = (byte)(160 + _rng.Next(96));
+            subGrid.SetCell(subX, subY, SubCellState.Trail, 0, intensity);
+
+            // Mark terrain tile as claimed for gameplay
+            _tendril.ClaimedTiles.Add(
+                TendrilController.PackCoords(terrainX, terrainY));
+
+            // Add neighbors to frontier
+            AddAdjacentToFrontier(subGrid, subX, subY);
         }
     }
 }

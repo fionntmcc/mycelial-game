@@ -10,13 +10,13 @@
 [ext_resource type="Script" uid="uid://62mqlvkcqfkw" path="res://scripts/world/CreatureManager.cs" id="8_4mrxx"]
 [ext_resource type="Script" uid="uid://c85h8iums8xao" path="res://scripts/world/FogOfWar.cs" id="9_fog01"]
 [ext_resource type="Script" uid="uid://b274d7dh216dp" path="res://scripts/debug/TendrilDebugOverlay.cs" id="10_w7kh3"]
+[ext_resource type="Script" uid="uid://bb37pjfigfgk3" path="res://scripts/world/TendrilRenderer.cs" id="11_e3hyu"]
 
 [node name="World" type="Node2D" unique_id=185312821]
 
 [node name="Camera2D" type="Camera2D" parent="." unique_id=1324047441]
 script = ExtResource("1_71j4m")
 TendrilControllerPath = NodePath("../TendrilController")
-DefaultZoom = 1.7
 SpeedZoomOutAmount = 0.45
 MaxShakeAmplitude = 15.0
 
@@ -37,6 +37,13 @@ ChunkManagerPath = NodePath("../ChunkManager")
 script = ExtResource("5_qfnet")
 ChunkManagerPath = NodePath("../ChunkManager")
 HungerRegenOnCorrupted = 4.0
+MoveDelay = 0.05
+MomentumAcceleration = 15.0
+MomentumDrag = 5.0
+MinMoveDelayMultiplier = 0.35
+BlobBaseRadius = 1
+WobbleAmplitude = 10.0
+WobbleSpeed = 4.0
 
 [node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
 script = ExtResource("7_4mrxx")
@@ -48,6 +55,9 @@ script = ExtResource("9_fog01")
 TendrilControllerPath = NodePath("../TendrilController")
 CameraPath = NodePath("../Camera2D")
 ChunkManagerPath = NodePath("../ChunkManager")
+SoilAbsorption = 0.1
+StoneAbsorption = 0.25
+WoodAbsorption = 0.1
 
 [node name="CreatureManager" type="Node2D" parent="." unique_id=83747499]
 script = ExtResource("8_4mrxx")
@@ -62,3 +72,8 @@ TendrilControllerPath = NodePath("../TendrilController")
 [node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=145948951]
 script = ExtResource("10_w7kh3")
 TendrilControllerPath = NodePath("../TendrilController")
+
+[node name="TendrilRenderer" type="Sprite2D" parent="." unique_id=1224740282]
+script = ExtResource("11_e3hyu")
+TendrilControllerPath = NodePath("../TendrilController")
+CameraPath = NodePath("../Camera2D")
