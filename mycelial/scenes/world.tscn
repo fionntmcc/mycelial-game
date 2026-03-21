@@ -36,7 +36,6 @@ HungerPerMove = 2.0
 HungerPerHardMove = 4.0
 HungerOnCorrupted = 0.0
 HungerRegenOnCorrupted = 4.0
-MoveDelay = 0.08
 MomentumAcceleration = 2.0
 MomentumDrag = 2.0
 
