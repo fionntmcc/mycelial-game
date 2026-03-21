@@ -44,21 +44,13 @@ MinMoveDelayMultiplier = 0.35
 BlobBaseRadius = 1
 UndulationAmplitude = 15.0
 UndulationFrequency = 0.12
-UndulationRampSpeed = 0.25
+UndulationRampSpeed = 0.0
 
 [node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
 script = ExtResource("7_4mrxx")
 ChunkManagerPath = NodePath("../ChunkManager")
 TendrilControllerPath = NodePath("../TendrilController")
-
-[node name="FogOfWar" type="Node2D" parent="." unique_id=173409581]
-script = ExtResource("9_fog01")
-TendrilControllerPath = NodePath("../TendrilController")
-CameraPath = NodePath("../Camera2D")
-ChunkManagerPath = NodePath("../ChunkManager")
-SoilAbsorption = 0.1
-StoneAbsorption = 0.25
-WoodAbsorption = 0.1
+SpreadsPerTick = 2
 
 [node name="CreatureManager" type="Node2D" parent="." unique_id=83747499]
 script = ExtResource("8_4mrxx")
@@ -78,3 +70,24 @@ TendrilControllerPath = NodePath("../TendrilController")
 script = ExtResource("11_e3hyu")
 TendrilControllerPath = NodePath("../TendrilController")
 CameraPath = NodePath("../Camera2D")
+CoreColor = Color(0.16078432, 0.050980393, 0.14117648, 0.9490196)
+CorePulseColor = Color(0.16078432, 0.050980393, 0.11372549, 1)
+FreshColor = Color(0.16078432, 0.050980393, 0.11372549, 1)
+TrailColor = Color(0.16078432, 0.050980393, 0.11372549, 1)
+RootColor = Color(0.21176471, 0.08235294, 0.19607843, 0.7019608)
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=957335522]
+script = ExtResource("9_fog01")
+TendrilControllerPath = NodePath("../TendrilController")
+CameraPath = NodePath("../Camera2D")
+ChunkManagerPath = NodePath("../ChunkManager")
+CoreLightEmission = 3.0
+FreshLightEmission = 2.0
+TrailLightEmission = 1.0
+RootLightEmission = 1.0
+PropagationPasses = 30
+AbsorptionAir = 0.001
+AbsorptionOrganic = 0.002
+AbsorptionHard = 0.01
+AbsorptionSolid = 0.02
+AbsorptionLiquid = 0.002

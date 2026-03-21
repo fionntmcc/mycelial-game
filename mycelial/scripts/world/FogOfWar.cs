@@ -5,130 +5,82 @@ using System.Collections.Generic;
 using Mycorrhiza.Data;
 
 /// <summary>
-/// Light-propagation fog of war.
+/// Fog of war driven by light propagation at sub-cell resolution.
 ///
-/// Instead of radius checks and line-of-sight raycasts, this system models
-/// light as a value that floods outward from the tendril, losing strength
-/// as it passes through tiles. Each tile type absorbs a different amount:
+/// The tendril body emits light that propagates through terrain with absorption.
+/// The head stamps a clean circle of light after propagation so it stays round.
+/// When the head touches an air pocket, raycast sight lines flood caves with light.
 ///
-///   - Air:       barely absorbs — light floods through caves naturally
-///   - Dirt/soil: moderate absorption — light bleeds a few tiles into earth
-///   - Stone:     heavy absorption — light barely penetrates
-///   - Mycelium:  very low absorption — your network is translucent
-///   - Water:     moderate absorption with a faint glow
-///
-/// Light sources:
-///   - Tendril head:  strong emitter (full light)
-///   - Tendril body:  medium emitter (fades along trail length)
-///   - Claimed tiles: very faint ambient glow
-///   - Emissive tiles: bioluminescent veins, lava, etc. emit their own light
-///
-/// The result: when you burrow near a cave, light naturally spills through
-/// the opening and illuminates the interior. No special cases needed. Deep
-/// caves far from the tendril stay dark. Your trail behind you glows faintly.
-///
-/// ALGORITHM:
-///   1. Allocate a flat light-level array covering the viewport
-///   2. Seed all light sources into the array
-///   3. BFS flood-fill: each tile propagates light to neighbors minus absorption
-///   4. Draw fog rects with alpha = 1 - lightLevel
-///
-/// PERFORMANCE:
-///   The BFS is bounded by the viewport size plus padding. With a typical
-///   viewport of ~80x50 tiles, the array is ~4000 entries. The BFS touches
-///   each tile at most once. This is faster than the old system's per-tile
-///   radius checks + LOS raycasts.
-///
-/// SETUP: Same as before — assign TendrilController, Camera, ChunkManager.
+/// SETUP:
+///   1. Change FogOfWar node from Node2D to Sprite2D
+///   2. Attach this script
+///   3. Assign TendrilControllerPath, CameraPath, ChunkManagerPath
 /// </summary>
-public partial class FogOfWar : Node2D
+public partial class FogOfWar : Sprite2D
 {
 	[Export] public NodePath TendrilControllerPath { get; set; }
 	[Export] public NodePath CameraPath { get; set; }
 	[Export] public NodePath ChunkManagerPath { get; set; }
 
-	// =========================================================================
-	//  LIGHT SOURCE STRENGTHS
-	// =========================================================================
+	// --- Light Emission ---
+	[Export] public float CoreLightEmission = 1.0f;
+	[Export] public float FreshLightEmission = 0.55f;
+	[Export] public float TrailLightEmission = 0.25f;
+	[Export] public float RootLightEmission = 0.15f;
 
-	[ExportGroup("Light Sources")]
+	// --- Head Light Circle ---
+	/// <summary>Radius of the clean circular light around the head, in sub-cells.</summary>
+	[Export] public int HeadLightRadius = 12;
 
-	/// <summary>Light emitted by the tendril head (max value).</summary>
-	[Export(PropertyHint.Range, "0.5,2.0,0.05")] public float HeadLightStrength = 1.0f;
+	// --- Cave Line-of-Sight ---
+	/// <summary>How far sight extends into caves, in terrain tiles.</summary>
+	[Export] public int CaveSightRadius = 28;
 
-	/// <summary>Light emitted by tendril body at the base (oldest point).</summary>
-	[Export(PropertyHint.Range, "0.0,1.0,0.05")] public float BodyLightBase = 0.15f;
+	/// <summary>Half-angle of the vision cone in degrees. 180 = full circle.</summary>
+	[Export] public float ConeHalfAngleDeg = 75f;
 
-	/// <summary>Light emitted by tendril body near the head (newest point).</summary>
-	[Export(PropertyHint.Range, "0.0,1.0,0.05")] public float BodyLightNearHead = 0.5f;
+	/// <summary>Radius of each ray stamp in sub-cells. Fills gaps between rays.</summary>
+	[Export] public int RayStampRadius = 2;
 
-	/// <summary>Faint ambient glow from claimed territory tiles.</summary>
-	[Export(PropertyHint.Range, "0.0,0.5,0.01")] public float TerritoryGlow = 0.08f;
+	/// <summary>How close the head must be to air to trigger cave sight (terrain tiles).</summary>
+	[Export] public int AirPocketContactRadius = 1;
 
-	/// <summary>Light emitted by emissive tiles (bioluminescent veins, lava, etc.).</summary>
-	[Export(PropertyHint.Range, "0.0,1.0,0.05")] public float EmissiveTileLight = 0.4f;
+	/// <summary>Number of rays to cast. More = smoother coverage. 64–128 is good.</summary>
+	[Export] public int SightRayCount = 96;
 
-	/// <summary>How many spline body points to sample as light sources.</summary>
-	[Export(PropertyHint.Range, "2,60,1")] public int BodyLightSamples = 30;
+	/// <summary>Light level stamped along cave sight lines (0–1).</summary>
+	[Export] public float CaveSightLight = 0.85f;
 
-	/// <summary>Sample every Nth rendered spline point.</summary>
-	[Export(PropertyHint.Range, "1,12,1")] public int BodySampleInterval = 5;
+	// --- Light Propagation ---
+	[Export] public int PropagationPasses = 15;
+	[Export] public float PropagationFactor = 0.92f;
 
-	// =========================================================================
-	//  LIGHT ABSORPTION PER TILE TYPE
-	// =========================================================================
+	// --- Terrain Absorption ---
+	[Export] public float AbsorptionAir = 0.01f;
+	[Export] public float AbsorptionOrganic = 0.06f;
+	[Export] public float AbsorptionHard = 0.15f;
+	[Export] public float AbsorptionSolid = 0.45f;
+	[Export] public float AbsorptionLiquid = 0.10f;
 
-	[ExportGroup("Light Absorption")]
-
-	/// <summary>How much light air absorbs per tile (very low = caves flood with light).</summary>
-	[Export(PropertyHint.Range, "0.005,0.1,0.005")] public float AirAbsorption = 0.025f;
-
-	/// <summary>How much light soft soil absorbs (dirt, leaf, sand).</summary>
-	[Export(PropertyHint.Range, "0.05,0.4,0.01")] public float SoilAbsorption = 0.13f;
-
-	/// <summary>How much light dense material absorbs (stone, clay, gravel).</summary>
-	[Export(PropertyHint.Range, "0.1,0.6,0.01")] public float StoneAbsorption = 0.30f;
-
-	/// <summary>How much light player-owned mycelium absorbs (very low = network glows).</summary>
-	[Export(PropertyHint.Range, "0.005,0.15,0.005")] public float MyceliumAbsorption = 0.02f;
-
-	/// <summary>How much light water/liquid absorbs.</summary>
-	[Export(PropertyHint.Range, "0.02,0.3,0.01")] public float WaterAbsorption = 0.06f;
-
-	/// <summary>How much light wood/roots absorb.</summary>
-	[Export(PropertyHint.Range, "0.05,0.3,0.01")] public float WoodAbsorption = 0.18f;
-
-	// =========================================================================
-	//  FOG APPEARANCE
-	// =========================================================================
-
-	[ExportGroup("Fog Appearance")]
-	[Export] public Color FogColor = new(0f, 0f, 0f, 1f);
-
-	/// <summary>Light level below which fog is fully opaque.</summary>
-	[Export(PropertyHint.Range, "0.0,0.1,0.005")] public float DarknessThreshold = 0.01f;
-
-	/// <summary>Extra tiles beyond viewport to compute light for (prevents pop-in).</summary>
-	[Export(PropertyHint.Range, "2,12,1")] public int ViewportPadding = 4;
-
-	// =========================================================================
-	//  INTERNAL STATE
-	// =========================================================================
+	// --- Fog Appearance ---
+	[Export] public Color FogColor = new Color(0f, 0f, 0f, 1f);
+	[Export(PropertyHint.Range, "0,1,0.01")] public float MaxFogAlpha = 1.0f;
+	[Export(PropertyHint.Range, "0,0.5,0.01")] public float LightCutoff = 0.02f;
+	[Export] public int Padding = 4;
 
 	private TendrilController _tendril;
 	private Camera2D _camera;
 	private ChunkManager _chunkManager;
-	private TendrilSplineRenderer _splineRenderer;
 
-	// Light level grid — reused each frame to avoid allocation
-	private float[] _lightGrid;
-	private int _gridWidth;
-	private int _gridHeight;
-	private int _gridOriginX; // World tile coord of grid[0,0]
-	private int _gridOriginY;
+	private Image _image;
+	private ImageTexture _texture;
+	private int _imgWidth;
+	private int _imgHeight;
+	private float _lastZoom;
 
-	// BFS queue — reused each frame
-	private readonly Queue<(int x, int y, float light)> _bfsQueue = new();
+	private float[] _lightMap;
+	private float[] _lightMapBack;
+	private float[] _absorptionMap;
 
 	public override void _Ready()
 	{
@@ -146,334 +98,304 @@ public partial class FogOfWar : Node2D
 			return;
 		}
 
+		TextureFilter = TextureFilterEnum.Nearest;
+		Centered = false;
+		int cellSize = WorldConfig.SubCellSize;
+		Scale = new Vector2(cellSize, cellSize);
 		ZAsRelative = false;
 		ZIndex = 5000;
-		QueueRedraw();
+
+		_lastZoom = _camera.Zoom.X;
+		ReallocateBuffers();
 	}
 
 	public override void _Process(double delta)
 	{
-		_splineRenderer ??= _tendril.GetNodeOrNull<TendrilSplineRenderer>("TendrilSplineRenderer");
-		QueueRedraw();
-	}
+		if (_tendril == null || _camera == null || _chunkManager == null) return;
 
-	public override void _Draw()
-	{
-		if (_tendril == null || _camera == null || _chunkManager == null)
-			return;
-
-		// --- 1. Calculate viewport tile bounds ---
-		Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
-		float zoom = Mathf.Max(0.0001f, _camera.Zoom.X);
-		Vector2 cameraPos = _camera.GlobalPosition;
-
-		float halfW = (viewportSize.X / zoom) * 0.5f;
-		float halfH = (viewportSize.Y / zoom) * 0.5f;
-
-		int minX = Mathf.FloorToInt((cameraPos.X - halfW) / WorldConfig.TileSize) - ViewportPadding;
-		int minY = Mathf.FloorToInt((cameraPos.Y - halfH) / WorldConfig.TileSize) - ViewportPadding;
-		int maxX = Mathf.CeilToInt((cameraPos.X + halfW) / WorldConfig.TileSize) + ViewportPadding;
-		int maxY = Mathf.CeilToInt((cameraPos.Y + halfH) / WorldConfig.TileSize) + ViewportPadding;
-
-		int width = maxX - minX + 1;
-		int height = maxY - minY + 1;
-
-		// --- 2. Allocate/resize light grid ---
-		int gridSize = width * height;
-		if (_lightGrid == null || _lightGrid.Length < gridSize)
-			_lightGrid = new float[gridSize];
-		else
-			System.Array.Clear(_lightGrid, 0, gridSize);
-
-		_gridWidth = width;
-		_gridHeight = height;
-		_gridOriginX = minX;
-		_gridOriginY = minY;
-
-		// --- 3. Seed light sources & propagate ---
-		_bfsQueue.Clear();
-
-		SeedHeadLight();
-		SeedBodyLight();
-		SeedTerritoryGlow(minX, minY, maxX, maxY);
-		SeedEmissiveTiles(minX, minY, maxX, maxY);
-
-		PropagateLightBFS();
-
-		// --- 4. Draw fog based on light levels ---
-		DrawFogFromLightGrid(minX, minY, maxX, maxY);
-	}
-
-	// =========================================================================
-	//  LIGHT SEEDING
-	// =========================================================================
-
-	/// <summary>Seed the tendril head as the primary light source.</summary>
-	private void SeedHeadLight()
-	{
-		int hx = _tendril.HeadX;
-		int hy = _tendril.HeadY;
-		SeedLight(hx, hy, HeadLightStrength);
-	}
-
-	/// <summary>Seed light along the tendril spline body, fading from head to base.</summary>
-	private void SeedBodyLight()
-	{
-		if (_splineRenderer == null) return;
-
-		var line = _splineRenderer.GetNodeOrNull<Line2D>("Line2D");
-		if (line == null || line.GetPointCount() < 2) return;
-
-		int pointCount = line.GetPointCount();
-		int interval = System.Math.Max(1, BodySampleInterval);
-		int sampled = 0;
-
-		for (int i = pointCount - 1; i >= 0 && sampled < BodyLightSamples; i -= interval)
+		float currentZoom = _camera.Zoom.X;
+		if (!Mathf.IsEqualApprox(currentZoom, _lastZoom, 0.001f))
 		{
-			// t=0 at head (newest), t=1 at base (oldest)
-			float t = 1f - ((float)i / (pointCount - 1));
-			float strength = Mathf.Lerp(BodyLightNearHead, BodyLightBase, t);
+			_lastZoom = currentZoom;
+			ReallocateBuffers();
+		}
 
-			if (strength < DarknessThreshold) continue;
+		PaintFrame();
+	}
 
-			Vector2 point = line.GetPointPosition(i);
-			Vector2 worldPoint = _splineRenderer.GlobalTransform * point;
+	private void ReallocateBuffers()
+	{
+		Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
+		float zoom = _camera.Zoom.X;
+		int cellSize = WorldConfig.SubCellSize;
 
-			int tx = Mathf.FloorToInt(worldPoint.X / WorldConfig.TileSize);
-			int ty = Mathf.FloorToInt(worldPoint.Y / WorldConfig.TileSize);
+		_imgWidth = (int)Mathf.Ceil(viewportSize.X / zoom / cellSize) + Padding * 2;
+		_imgHeight = (int)Mathf.Ceil(viewportSize.Y / zoom / cellSize) + Padding * 2;
 
-			SeedLight(tx, ty, strength);
-			sampled++;
+		int totalCells = _imgWidth * _imgHeight;
+		_lightMap = new float[totalCells];
+		_lightMapBack = new float[totalCells];
+		_absorptionMap = new float[totalCells];
+
+		_image = Image.CreateEmpty(_imgWidth, _imgHeight, false, Image.Format.Rgba8);
+
+		if (_texture == null)
+		{
+			_texture = ImageTexture.CreateFromImage(_image);
+			Texture = _texture;
+		}
+		else
+		{
+			_texture.Update(_image);
 		}
 	}
 
-	/// <summary>Seed faint glow from all claimed territory tiles visible in viewport.</summary>
-	private void SeedTerritoryGlow(int minX, int minY, int maxX, int maxY)
+	private void PaintFrame()
 	{
-		if (TerritoryGlow < DarknessThreshold) return;
+		int cellSize = WorldConfig.SubCellSize;
+		int scale = WorldConfig.SubGridScale;
+		Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
+		Vector2 cameraPos = _camera.GlobalPosition;
+		float zoom = _camera.Zoom.X;
 
-		for (int y = minY; y <= maxY; y++)
+		float halfW = (viewportSize.X / zoom) / 2f;
+		float halfH = (viewportSize.Y / zoom) / 2f;
+
+		int originSubX = (int)Mathf.Floor((cameraPos.X - halfW) / cellSize) - Padding;
+		int originSubY = (int)Mathf.Floor((cameraPos.Y - halfH) / cellSize) - Padding;
+
+		int totalCells = _imgWidth * _imgHeight;
+
+		// --- Step 1: Clear light map ---
+		System.Array.Clear(_lightMap, 0, totalCells);
+
+		// --- Step 2: Build absorption map from terrain ---
+		for (int py = 0; py < _imgHeight; py++)
 		{
-			for (int x = minX; x <= maxX; x++)
+			for (int px = 0; px < _imgWidth; px++)
 			{
-				if (_tendril.IsOnTerritory(x, y))
-					SeedLight(x, y, TerritoryGlow);
+				int subX = originSubX + px;
+				int subY = originSubY + py;
+				int tileX = FloorDiv(subX, scale);
+				int tileY = FloorDiv(subY, scale);
+
+				TileType tile = _chunkManager.GetTileAt(tileX, tileY);
+				_absorptionMap[py * _imgWidth + px] = GetAbsorption(tile);
 			}
 		}
-	}
 
-	/// <summary>Seed light from emissive tiles (bioluminescent veins, lava, etc.).</summary>
-	private void SeedEmissiveTiles(int minX, int minY, int maxX, int maxY)
-	{
-		if (EmissiveTileLight < DarknessThreshold) return;
-
-		for (int y = minY; y <= maxY; y++)
+		// --- Step 3: Stamp light from trail/root cells (NOT core) ---
+		SubGridData subGrid = _tendril.SubGrid;
+		if (subGrid != null)
 		{
-			for (int x = minX; x <= maxX; x++)
+			foreach (var (key, cell) in subGrid.Cells)
 			{
-				TileType tile = _chunkManager.GetTileAt(x, y);
-				if (TileProperties.Is(tile, TileFlags.Emissive))
-				{
-					// Different emissive tiles could have different strengths
-					float strength = tile switch
-					{
-						TileType.Lava => EmissiveTileLight * 1.2f,
-						TileType.BioluminescentVein => EmissiveTileLight,
-						TileType.ThermalVent => EmissiveTileLight * 0.8f,
-						TileType.LivingFossil => EmissiveTileLight * 0.5f,
-						TileType.MyceliumCore => EmissiveTileLight * 0.6f,
-						TileType.RootTip => EmissiveTileLight * 0.3f,
-						_ => EmissiveTileLight * 0.4f,
-					};
+				if (cell.State == SubCellState.Empty || cell.State == SubCellState.Core)
+					continue;
 
-					SeedLight(x, y, strength);
+				var (sx, sy) = SubGridData.UnpackCoords(key);
+				int px = sx - originSubX;
+				int py = sy - originSubY;
+
+				if (px < 0 || px >= _imgWidth || py < 0 || py >= _imgHeight)
+					continue;
+
+				float emission = cell.State switch
+				{
+					SubCellState.Fresh => FreshLightEmission,
+					SubCellState.Trail => TrailLightEmission,
+					SubCellState.Root => RootLightEmission,
+					_ => 0f,
+				};
+
+				int idx = py * _imgWidth + px;
+				if (emission > _lightMap[idx])
+					_lightMap[idx] = emission;
+			}
+		}
+
+		// --- Step 4: Propagate light ---
+		for (int pass = 0; pass < PropagationPasses; pass++)
+		{
+			System.Array.Copy(_lightMap, _lightMapBack, totalCells);
+
+			for (int py = 1; py < _imgHeight - 1; py++)
+			{
+				for (int px = 1; px < _imgWidth - 1; px++)
+				{
+					int idx = py * _imgWidth + px;
+
+					float maxNeighbor = _lightMapBack[idx - 1];
+					float n = _lightMapBack[idx + 1];
+					if (n > maxNeighbor) maxNeighbor = n;
+					n = _lightMapBack[idx - _imgWidth];
+					if (n > maxNeighbor) maxNeighbor = n;
+					n = _lightMapBack[idx + _imgWidth];
+					if (n > maxNeighbor) maxNeighbor = n;
+
+					float propagated = maxNeighbor * PropagationFactor - _absorptionMap[idx];
+					if (propagated < 0f) propagated = 0f;
+
+					if (propagated > _lightMap[idx])
+						_lightMap[idx] = propagated;
 				}
 			}
 		}
-	}
 
-	/// <summary>
-	/// Seed a single light source. If the tile already has more light, this is a no-op.
-	/// Adds to BFS queue for propagation.
-	/// </summary>
-	private void SeedLight(int worldX, int worldY, float strength)
-	{
-		int lx = worldX - _gridOriginX;
-		int ly = worldY - _gridOriginY;
+		// --- Step 4b: Stamp head circle AFTER propagation so it stays clean ---
+		int headSubX = _tendril.SubHeadX;
+		int headSubY = _tendril.SubHeadY;
 
-		if (lx < 0 || lx >= _gridWidth || ly < 0 || ly >= _gridHeight)
-			return;
-
-		int idx = ly * _gridWidth + lx;
-
-		// Only seed if this is brighter than existing light
-		if (strength <= _lightGrid[idx])
-			return;
-
-		_lightGrid[idx] = strength;
-		_bfsQueue.Enqueue((worldX, worldY, strength));
-	}
-
-	// =========================================================================
-	//  LIGHT PROPAGATION — BFS Flood Fill
-	// =========================================================================
-
-	// Cardinal neighbor offsets
-	private static readonly (int dx, int dy)[] Neighbors = { (-1, 0), (1, 0), (0, -1), (0, 1) };
-
-	/// <summary>
-	/// BFS propagation: each tile passes light to its neighbors, minus the
-	/// neighbor's absorption cost. Light only flows if it would increase
-	/// the neighbor's current level.
-	/// </summary>
-	private void PropagateLightBFS()
-	{
-		while (_bfsQueue.Count > 0)
+		for (int dy = -HeadLightRadius; dy <= HeadLightRadius; dy++)
 		{
-			var (wx, wy, currentLight) = _bfsQueue.Dequeue();
-
-			foreach (var (dx, dy) in Neighbors)
+			for (int dx = -HeadLightRadius; dx <= HeadLightRadius; dx++)
 			{
-				int nx = wx + dx;
-				int ny = wy + dy;
+				float dist = Mathf.Sqrt(dx * dx + dy * dy);
+				if (dist > HeadLightRadius) continue;
 
-				int lx = nx - _gridOriginX;
-				int ly = ny - _gridOriginY;
-
-				if (lx < 0 || lx >= _gridWidth || ly < 0 || ly >= _gridHeight)
+				int px = (headSubX + dx) - originSubX;
+				int py = (headSubY + dy) - originSubY;
+				if (px < 0 || px >= _imgWidth || py < 0 || py >= _imgHeight)
 					continue;
 
-				// How much light this neighbor tile absorbs
-				float absorption = GetTileAbsorption(nx, ny);
+				float falloff = 1f - (dist / HeadLightRadius);
+				float emission = CoreLightEmission * falloff;
 
-				float newLight = currentLight - absorption;
-				if (newLight <= DarknessThreshold)
-					continue;
-
-				int idx = ly * _gridWidth + lx;
-
-				// Only propagate if we'd increase this tile's light
-				if (newLight <= _lightGrid[idx])
-					continue;
-
-				_lightGrid[idx] = newLight;
-				_bfsQueue.Enqueue((nx, ny, newLight));
+				int idx = py * _imgWidth + px;
+				if (emission > _lightMap[idx])
+					_lightMap[idx] = emission;
 			}
 		}
-	}
 
-	// =========================================================================
-	//  TILE ABSORPTION — How much light each tile type consumes
-	// =========================================================================
+		// --- Step 4c: Directional cave line-of-sight at sub-cell resolution ---
+		int headTileX = _tendril.HeadX;
+		int headTileY = _tendril.HeadY;
 
-	/// <summary>
-	/// Get how much light a tile absorbs when light passes through it.
-	/// Low values = translucent (air, mycelium). High values = opaque (stone).
-	/// </summary>
-	private float GetTileAbsorption(int worldX, int worldY)
-	{
-		TileType tile = _chunkManager.GetTileAt(worldX, worldY);
-
-		// Air — barely absorbs. Caves flood with light.
-		if (tile == TileType.Air)
-			return AirAbsorption;
-
-		// Player-owned mycelium — your network is almost transparent to light
-		if (TileProperties.Is(tile, TileFlags.PlayerOwned))
-			return MyceliumAbsorption;
-
-		// Liquids
-		if (TileProperties.Is(tile, TileFlags.Liquid))
-			return WaterAbsorption;
-
-		// Specific tile types
-		return tile switch
+		if (IsNearAir(headTileX, headTileY))
 		{
-			// Soft soil — moderate
-			TileType.Dirt => SoilAbsorption,
-			TileType.Sand => SoilAbsorption,
-			TileType.Leaf => SoilAbsorption * 0.7f,
-			TileType.InfectedDirt => SoilAbsorption * 0.8f,
+			float angleStep = Mathf.Tau / SightRayCount;
+			int maxSteps = CaveSightRadius * scale;
 
-			// Dense material — heavy
-			TileType.Stone => StoneAbsorption,
-			TileType.Clay => StoneAbsorption * 0.85f,
-			TileType.Gravel => StoneAbsorption * 0.75f,
-			TileType.Obsidian => StoneAbsorption * 1.3f,
-			TileType.Basalt => StoneAbsorption * 1.1f,
+			// Cone direction from tendril movement
+			Vector2 fwd = _tendril.LastMoveDirection;
+			float fwdAngle = Mathf.Atan2(fwd.Y, fwd.X);
+			float halfCone = Mathf.DegToRad(ConeHalfAngleDeg);
 
-			// Wood/roots — moderate-heavy
-			TileType.Wood => WoodAbsorption,
-			TileType.Roots => WoodAbsorption * 0.9f,
-			TileType.RootTip => WoodAbsorption * 0.7f,
-
-			// Biome accents — varies
-			TileType.BioluminescentVein => AirAbsorption, // Glows, barely absorbs
-			TileType.BoneMarrow => SoilAbsorption * 0.6f,
-			TileType.FossilRib => StoneAbsorption * 0.7f,
-			TileType.Boneite => StoneAbsorption * 0.8f,
-			TileType.CrystalGrotte => SoilAbsorption * 0.5f, // Semi-transparent crystals
-			TileType.PetrifiedMycelium => SoilAbsorption * 0.4f,
-			TileType.LivingFossil => SoilAbsorption * 0.3f,
-			TileType.AncientSporeNode => SoilAbsorption * 0.5f,
-			TileType.ThermalVent => AirAbsorption * 2f,
-
-			// Grass (solid but organic) — moderate
-			_ when TileProperties.IsGrass(tile) => SoilAbsorption * 1.1f,
-			_ when TileProperties.IsInfectedGrass(tile) => MyceliumAbsorption * 1.5f,
-
-			// Default solid — treat as soil
-			_ => TileProperties.Is(tile, TileFlags.Solid) ? SoilAbsorption : AirAbsorption,
-		};
-	}
-
-	// =========================================================================
-	//  FOG RENDERING
-	// =========================================================================
-
-	/// <summary>
-	/// Draw fog rectangles based on computed light levels.
-	/// Fog alpha = 1 - lightLevel, clamped to [0, 1].
-	/// Tiles at or above 1.0 light are fully visible (no fog drawn).
-	/// </summary>
-	private void DrawFogFromLightGrid(int minX, int minY, int maxX, int maxY)
-	{
-		int ts = WorldConfig.TileSize;
-
-		for (int y = minY; y <= maxY; y++)
-		{
-			for (int x = minX; x <= maxX; x++)
+			for (int r = 0; r < SightRayCount; r++)
 			{
-				int lx = x - _gridOriginX;
-				int ly = y - _gridOriginY;
+				// Distribute rays within the cone
+				float angle = fwdAngle - halfCone + (r / (float)(SightRayCount - 1)) * halfCone * 2f;
 
-				if (lx < 0 || lx >= _gridWidth || ly < 0 || ly >= _gridHeight)
-					continue;
+				float dirX = Mathf.Cos(angle);
+				float dirY = Mathf.Sin(angle);
 
-				float light = _lightGrid[ly * _gridWidth + lx];
-
-				// Fully lit — skip drawing
-				if (light >= 1.0f)
-					continue;
-
-				// Below threshold — fully dark
-				float alpha;
-				if (light <= DarknessThreshold)
+				for (int step = 1; step <= maxSteps; step++)
 				{
-					alpha = 1.0f;
+					int subX = headSubX + Mathf.RoundToInt(dirX * step);
+					int subY = headSubY + Mathf.RoundToInt(dirY * step);
+
+					int tileX = FloorDiv(subX, scale);
+					int tileY = FloorDiv(subY, scale);
+					TileType tile = _chunkManager.GetTileAt(tileX, tileY);
+					if (TileProperties.Is(tile, TileFlags.Solid))
+						break;
+
+					// Stamp a small kernel around the ray point to fill gaps
+					float t = (float)step / maxSteps;
+					float light = CaveSightLight * (1f - t * t);
+
+					for (int ky = -RayStampRadius; ky <= RayStampRadius; ky++)
+					{
+						for (int kx = -RayStampRadius; kx <= RayStampRadius; kx++)
+						{
+							if (kx * kx + ky * ky > RayStampRadius * RayStampRadius)
+								continue;
+
+							int px = (subX + kx) - originSubX;
+							int py = (subY + ky) - originSubY;
+
+							if (px < 0 || px >= _imgWidth || py < 0 || py >= _imgHeight)
+								continue;
+
+							// Check the stamp pixel isn't inside solid terrain
+							int stampTileX = FloorDiv(subX + kx, scale);
+							int stampTileY = FloorDiv(subY + ky, scale);
+							TileType stampTile = _chunkManager.GetTileAt(stampTileX, stampTileY);
+							if (TileProperties.Is(stampTile, TileFlags.Solid))
+								continue;
+
+							int idx = py * _imgWidth + px;
+							if (light > _lightMap[idx])
+								_lightMap[idx] = light;
+						}
+					}
+				}
+			}
+		}
+
+		// --- Step 5: Convert light map to fog image ---
+		float maxAlpha = Mathf.Clamp(MaxFogAlpha, 0f, 1f);
+
+		for (int py = 0; py < _imgHeight; py++)
+		{
+			for (int px = 0; px < _imgWidth; px++)
+			{
+				float light = _lightMap[py * _imgWidth + px];
+
+				if (light <= LightCutoff)
+				{
+					_image.SetPixel(px, py, new Color(FogColor.R, FogColor.G, FogColor.B, maxAlpha));
 				}
 				else
 				{
-					// Map light (threshold..1.0) to alpha (1.0..0.0)
-					alpha = 1.0f - Mathf.Clamp(light, 0f, 1f);
+					float alpha = maxAlpha * (1f - Mathf.Clamp(light, 0f, 1f));
+					_image.SetPixel(px, py, new Color(FogColor.R, FogColor.G, FogColor.B, alpha));
 				}
-
-				DrawRect(
-					new Rect2(x * ts, y * ts, ts, ts),
-					new Color(FogColor.R, FogColor.G, FogColor.B, alpha),
-					true
-				);
 			}
 		}
+
+		_texture.Update(_image);
+		GlobalPosition = new Vector2(originSubX * cellSize, originSubY * cellSize);
 	}
+
+	// =========================================================================
+	//  HELPERS
+	// =========================================================================
+
+	private bool IsNearAir(int tileX, int tileY)
+	{
+		for (int dy = -AirPocketContactRadius; dy <= AirPocketContactRadius; dy++)
+		{
+			for (int dx = -AirPocketContactRadius; dx <= AirPocketContactRadius; dx++)
+			{
+				TileType tile = _chunkManager.GetTileAt(tileX + dx, tileY + dy);
+				if (tile == TileType.Air)
+					return true;
+			}
+		}
+		return false;
+	}
+
+	private float GetAbsorption(TileType tile)
+	{
+		if (tile == TileType.Air)
+			return AbsorptionAir;
+
+		if (TileProperties.Is(tile, TileFlags.Liquid))
+			return AbsorptionLiquid;
+
+		if (TileProperties.Is(tile, TileFlags.Solid) && !TileProperties.Is(tile, TileFlags.Breakable))
+			return AbsorptionSolid;
+
+		if (TileProperties.Is(tile, TileFlags.Solid) && !TileProperties.Is(tile, TileFlags.Organic))
+			return AbsorptionHard;
+
+		if (TileProperties.Is(tile, TileFlags.Organic))
+			return AbsorptionOrganic;
+
+		return AbsorptionHard;
+	}
+
+	private static int FloorDiv(int a, int b)
+		=> a >= 0 ? a / b : (a - b + 1) / b;
 }

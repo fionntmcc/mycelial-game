@@ -46,6 +46,12 @@ public partial class TendrilRenderer : Sprite2D
 
 	/// <summary>Root tendril color — near-black purple threads.</summary>
 	[Export] public Color RootColor = new Color(0.15f, 0.06f, 0.14f, 0.70f);
+	
+	/// <summary>Aura glow radius in sub-cells around trail/root cells.</summary>
+	[Export] public int AuraRadius = 2;
+
+	/// <summary>Aura base color — faint bioluminescent bleed.</summary>
+	[Export] public Color AuraColor = new Color(0.55f, 0.15f, 0.45f, 0.25f);
 
 	/// <summary>Speed of the core pulse animation (radians per second).</summary>
 	[Export] public float PulseSpeed = 4.5f;
@@ -172,14 +178,49 @@ public partial class TendrilRenderer : Sprite2D
 		// Pulse value for core animation (0..1 sine wave)
 		float pulse = (Mathf.Sin(_pulseTimer) + 1f) * 0.5f;
 
-		// Paint every occupied cell that falls within the image bounds
+		// --- Pass 1: Aura glow around trail and root cells ---
+		if (AuraRadius > 0)
+		{
+			foreach (var (key, cell) in subGrid.Cells)
+			{
+				if (cell.State != SubCellState.Trail && cell.State != SubCellState.Root)
+					continue;
+
+				var (sx, sy) = SubGridData.UnpackCoords(key);
+				int px = sx - originSubX;
+				int py = sy - originSubY;
+
+				for (int ay = -AuraRadius; ay <= AuraRadius; ay++)
+				{
+					for (int ax = -AuraRadius; ax <= AuraRadius; ax++)
+					{
+						int apx = px + ax;
+						int apy = py + ay;
+						if (apx < 0 || apx >= _imgWidth || apy < 0 || apy >= _imgHeight)
+							continue;
+
+						float dist = Mathf.Sqrt(ax * ax + ay * ay);
+						if (dist > AuraRadius) continue;
+
+						// Fade alpha with distance
+						float fade = 1f - (dist / AuraRadius);
+						Color glow = new Color(AuraColor.R, AuraColor.G, AuraColor.B, AuraColor.A * fade);
+
+						// Blend with existing pixel (max alpha so auras overlap softly)
+						Color existing = _image.GetPixel(apx, apy);
+						if (glow.A > existing.A)
+							_image.SetPixel(apx, apy, glow);
+					}
+				}
+			}
+		}
+
+		// --- Pass 2: Actual cells on top ---
 		foreach (var (key, cell) in subGrid.Cells)
 		{
 			if (cell.State == SubCellState.Empty) continue;
 
 			var (sx, sy) = SubGridData.UnpackCoords(key);
-
-			// Sub-grid coord → image pixel coord
 			int px = sx - originSubX;
 			int py = sy - originSubY;
 
