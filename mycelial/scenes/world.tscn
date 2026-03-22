@@ -42,10 +42,12 @@ MoveDelay = 0.09
 MomentumAcceleration = 15.0
 MomentumDrag = 5.0
 MinMoveDelayMultiplier = 0.35
+RootSpawnIntervalJitter = -217
 BlobBaseRadius = 1
-UndulationAmplitude = 15.0
-UndulationFrequency = 0.12
-UndulationRampSpeed = 0.0
+BlobNoiseAmplitude = 3.0
+BlobNoiseFrequency = 3.0
+BlobStretchFactor = 0.3
+HarpoonPath = NodePath("../TendrilHarpoon")
 
 [node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
 script = ExtResource("7_4mrxx")
