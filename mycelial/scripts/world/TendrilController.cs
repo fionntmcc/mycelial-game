@@ -102,6 +102,9 @@ public partial class TendrilController : Node2D
 	/// <summary>How strongly the tendril steers toward nearby creatures (0–1).</summary>
 	[Export] public float CreatureSteerStrength = 0.15f;
 	
+	/// <summary>Path to TendrilHarpoon node (freezes movement while harpoon is active).</summary>
+	[Export] public NodePath HarpoonPath { get; set; }
+	
 	/// <summary>Current movement direction for external systems (fog cone, harpoon, etc).</summary>
 	public Vector2 LastMoveDirection => _lastMoveDir;
 
@@ -212,6 +215,8 @@ public partial class TendrilController : Node2D
 
 	// Creature auto-steering
 	private CreatureManager _creatureManager;
+	
+	private TendrilHarpoon _harpoon;
 
 	// Track which terrain tile we last entered (to trigger gameplay effects once per tile)
 	private int _lastTerrainX;
@@ -258,6 +263,9 @@ public partial class TendrilController : Node2D
 		// Creature auto-steering (optional — works fine without)
 		if (CreatureManagerPath != null)
 			_creatureManager = GetNode<CreatureManager>(CreatureManagerPath);
+		
+		if (HarpoonPath != null)
+			_harpoon = GetNode<TendrilHarpoon>(HarpoonPath);
 
 		Hunger = MaxHunger;
 		CallDeferred(nameof(Initialize));
@@ -345,7 +353,17 @@ public partial class TendrilController : Node2D
 			EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
 		}
 
-		ProcessMovement(dt);
+		if (_harpoon != null && _harpoon.IsActive)
+		{
+			// Freeze: kill momentum so it doesn't resume after retract
+			_momentum = Vector2.Zero;
+			_moveAccumulator = Vector2.Zero;
+		}
+		else
+		{
+			ProcessMovement(dt);
+		}
+		
 		ProcessRootSpread(dt);
 
 		// Age fresh trail cells into settled trail

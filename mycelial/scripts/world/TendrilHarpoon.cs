@@ -5,25 +5,27 @@ using System.Collections.Generic;
 using Mycorrhiza.Data;
 
 /// <summary>
-/// Harpoon-tendril shooting mechanic on the sub-grid.
+/// Harpoon-tendril with two firing modes on the sub-grid.
 ///
-/// When the tendril head is near a cave (adjacent air tiles), the player can
-/// hold fire to charge, then release to launch a harpoon tendril through the
-/// air in the exact facing direction (not snapped to 8 directions).
+/// TAP fire: Quick press-release fires a fast, straight, unguided shot.
+///   - Uses facing direction at time of fire
+///   - Fast extension speed, short-medium range
+///   - Good for sniping visible creatures
 ///
-/// The harpoon traces a line through sub-grid cells using DDA (Digital
-/// Differential Analyzer), placing Core sub-cells along its path. When it
-/// crosses into a new terrain tile, it checks for creatures and wall collisions.
+/// HOLD fire: Keep holding past a brief charge-up, then the tendril begins
+///   extending and you STEER it with movement input (WASD / left stick).
+///   - Slower extension speed, longer max range
+///   - Turn radius based on speed — feels like piloting a living thing
+///   - Release fire button to stop extending → retract begins
+///   - The main tendril head is FROZEN while steering
 ///
-/// On creature hit: grabs it, retracts along the path, delivers it to the head.
-/// On wall hit or max range: retracts empty.
-/// Retraction clears the sub-cells that were placed.
-///
-/// Input: Spacebar (keyboard) or R2 / right trigger (controller).
+/// Both modes: harpoon traces through air on the sub-grid using DDA.
+/// Grabs the first creature it hits and drags it back on retract.
 ///
 /// SETUP:
-///   - Add as sibling Node of TendrilController in the scene
+///   - Add as sibling Node of TendrilController
 ///   - Assign TendrilControllerPath, ChunkManagerPath, CreatureManagerPath
+///   - On TendrilController, assign HarpoonPath pointing to this node
 /// </summary>
 public partial class TendrilHarpoon : Node
 {
@@ -31,35 +33,43 @@ public partial class TendrilHarpoon : Node
 	[Export] public NodePath ChunkManagerPath { get; set; }
 	[Export] public NodePath CreatureManagerPath { get; set; }
 
-	// --- Charge Config ---
-	[Export] public float ChargeTimeMax = 0.6f;
-	[Export] public float MinChargeFraction = 0.15f;
+	// --- Timing ---
+	/// <summary>Hold duration before guided mode activates (seconds).</summary>
+	[Export] public float GuidedModeThreshold = 0.18f;
 
-	// --- Shot Config ---
-	/// <summary>Max sub-grid cells the harpoon can travel at full charge.</summary>
-	[Export] public int MaxRange = 120;
-	/// <summary>Min sub-grid cells at minimum charge.</summary>
-	[Export] public int MinRange = 24;
-	/// <summary>Seconds between each sub-cell step when extending.</summary>
-	[Export] public float ShootStepDelay = 0.005f;
-	/// <summary>Seconds between each sub-cell step when retracting.</summary>
-	[Export] public float RetractStepDelay = 0.008f;
-	/// <summary>Hunger cost to fire.</summary>
+	// --- Tap Shot Config ---
+	[Export] public int TapRange = 50;
+	[Export] public float TapStepDelay = 0.003f;
+	[Export] public int TapSubStepsPerTick = 5;
+
+	// --- Guided Shot Config ---
+	[Export] public int GuidedMaxRange = 180;
+	[Export] public float GuidedStepDelay = 0.008f;
+	[Export] public int GuidedSubStepsPerTick = 2;
+	/// <summary>How fast the guided tendril can turn (radians/second).</summary>
+	[Export] public float GuidedTurnRate = 4.5f;
+
+	// --- Shape ---
+	/// <summary>Radius of the harpoon tendril in sub-cells. 0 = single pixel, 2 = wormy, 3+ = fat.</summary>
+	[Export(PropertyHint.Range, "0,6,1")] public int HarpoonThickness = 2;
+	/// <summary>How much the edge wobbles (0 = perfect circle, higher = more organic).</summary>
+	[Export(PropertyHint.Range, "0,2,0.1")] public float ShapeIrregularity = 0.8f;
+
+	// --- Shared Config ---
+	[Export] public float RetractStepDelay = 0.005f;
+	[Export] public int RetractSubStepsPerTick = 6;
 	[Export] public float HungerCost = 5f;
-	/// <summary>How close (terrain tiles) to air to allow firing.</summary>
 	[Export] public int CaveDetectRadius = 3;
-	/// <summary>Sub-cells to step per tick (for fast extension).</summary>
-	[Export] public int SubStepsPerTick = 3;
-
-	// --- Controller dead zone for R2 trigger ---
 	[Export] public float TriggerDeadZone = 0.3f;
+	[Export] public float StickDeadZone = 0.22f;
 
 	// --- State Machine ---
 	private enum HarpoonState
 	{
 		Idle,
-		Charging,
-		Shooting,
+		Winding,      // Fire button held, waiting to see if tap or guided
+		Guided,       // Extending with player steering
+		Straight,     // Extending in a straight line (tap shot)
 		Retracting,
 	}
 
@@ -68,26 +78,27 @@ public partial class TendrilHarpoon : Node
 	private CreatureManager _creatureManager;
 
 	private HarpoonState _state = HarpoonState.Idle;
-	private float _chargeTimer;
+	private float _windTimer;
 	private float _stepTimer;
 
 	// DDA line-tracing state
-	private Vector2 _shotDirection;     // Exact normalized direction (not grid-snapped)
-	private float _ddaX, _ddaY;         // Fractional position along the line
-	private int _currentSubX, _currentSubY; // Current integer sub-grid position
+	private Vector2 _shotDirection;
+	private float _ddaX, _ddaY;
+	private int _currentSubX, _currentSubY;
 
-	// Path of sub-cells placed (for retraction and cleanup)
+	// Path of sub-cells placed (center points — blob is stamped around each)
 	private readonly List<(int SubX, int SubY)> _harpoonPath = new();
 	private int _targetRange;
+	private int _stepsPerTick;
 
-	// Grabbed creature (null if miss)
+	// Grabbed creature
 	private Creature _grabbedCreature;
 
-	// Track which terrain tile we last checked (avoid redundant lookups)
+	// Terrain tile tracking
 	private int _lastCheckedTerrainX;
 	private int _lastCheckedTerrainY;
 
-	// Input edge-detection state
+	// Input state
 	private bool _wasSpaceHeld;
 	private bool _wasTriggerHeld;
 
@@ -98,9 +109,12 @@ public partial class TendrilHarpoon : Node
 	[Signal] public delegate void CreatureGrabbedEventHandler(int creatureX, int creatureY);
 	[Signal] public delegate void HarpoonRetractedEventHandler(bool caughtSomething);
 
+	/// <summary>True when the harpoon is doing anything (TendrilController checks this to freeze).</summary>
 	public bool IsActive => _state != HarpoonState.Idle;
-	public float ChargePercent => _state == HarpoonState.Charging
-		? Mathf.Clamp(_chargeTimer / ChargeTimeMax, 0f, 1f) : 0f;
+
+	/// <summary>0–1 charge indicator for HUD display.</summary>
+	public float ChargePercent => _state == HarpoonState.Winding
+		? Mathf.Clamp(_windTimer / GuidedModeThreshold, 0f, 1f) : 0f;
 
 	public override void _Ready()
 	{
@@ -127,11 +141,14 @@ public partial class TendrilHarpoon : Node
 			case HarpoonState.Idle:
 				ProcessIdle();
 				break;
-			case HarpoonState.Charging:
-				ProcessCharging(dt);
+			case HarpoonState.Winding:
+				ProcessWinding(dt);
 				break;
-			case HarpoonState.Shooting:
-				ProcessShooting(dt);
+			case HarpoonState.Straight:
+				ProcessExtending(dt);
+				break;
+			case HarpoonState.Guided:
+				ProcessGuided(dt);
 				break;
 			case HarpoonState.Retracting:
 				ProcessRetracting(dt);
@@ -149,116 +166,161 @@ public partial class TendrilHarpoon : Node
 		if (!IsNearCave()) return;
 		if (_tendril.Hunger < HungerCost) return;
 
-		_state = HarpoonState.Charging;
-		_chargeTimer = 0f;
+		_state = HarpoonState.Winding;
+		_windTimer = 0f;
 		EmitSignal(SignalName.ChargeStarted);
 	}
 
 	// =========================================================================
-	//  CHARGING
+	//  WINDING — waiting to see if this is a tap or a hold
 	// =========================================================================
 
-	private void ProcessCharging(float dt)
+	private void ProcessWinding(float dt)
 	{
-		_chargeTimer += dt;
+		_windTimer += dt;
 
 		if (!IsFireInputHeld())
 		{
-			float fraction = Mathf.Clamp(_chargeTimer / ChargeTimeMax, 0f, 1f);
-
-			if (fraction >= MinChargeFraction)
-				Fire(fraction);
-			else
-			{
-				_state = HarpoonState.Idle;
-				_chargeTimer = 0f;
-				EmitSignal(SignalName.ChargeCancelled);
-			}
+			FireStraight();
 		}
-		else if (_chargeTimer >= ChargeTimeMax)
+		else if (_windTimer >= GuidedModeThreshold)
 		{
-			Fire(1.0f);
+			FireGuided();
 		}
 	}
 
 	// =========================================================================
-	//  FIRE — initialize DDA line trace from head in exact direction
+	//  FIRE — initialize DDA from head position
 	// =========================================================================
 
-	private void Fire(float chargeFraction)
+	private void InitializeShot()
 	{
-		// Use the exact continuous direction — no grid snapping
-		_shotDirection = _tendril.LastMoveDirection;
-		if (_shotDirection.LengthSquared() < 0.01f)
-			_shotDirection = new Vector2(0, 1); // Fallback to down
-
-		_shotDirection = _shotDirection.Normalized();
-
-		_targetRange = (int)Mathf.Lerp(MinRange, MaxRange, chargeFraction);
 		_harpoonPath.Clear();
 		_stepTimer = 0f;
 		_grabbedCreature = null;
 
-		// Initialize DDA from the tendril head sub-grid position
 		_ddaX = _tendril.SubHeadX + 0.5f;
 		_ddaY = _tendril.SubHeadY + 0.5f;
 		_currentSubX = _tendril.SubHeadX;
 		_currentSubY = _tendril.SubHeadY;
 
-		// Track initial terrain tile
 		var (tx, ty) = SubGridData.SubToTerrain(_currentSubX, _currentSubY);
 		_lastCheckedTerrainX = tx;
 		_lastCheckedTerrainY = ty;
 
 		_tendril.DrainHunger(HungerCost);
+	}
 
-		_state = HarpoonState.Shooting;
+	private void FireStraight()
+	{
+		_shotDirection = _tendril.LastMoveDirection;
+		if (_shotDirection.LengthSquared() < 0.01f)
+			_shotDirection = new Vector2(0, 1);
+		_shotDirection = _shotDirection.Normalized();
+
+		_targetRange = TapRange;
+		_stepsPerTick = TapSubStepsPerTick;
+
+		InitializeShot();
+
+		_state = HarpoonState.Straight;
 		EmitSignal(SignalName.HarpoonFired, _targetRange);
-		GD.Print($"Harpoon fired! Direction: ({_shotDirection.X:F2},{_shotDirection.Y:F2}), Range: {_targetRange} sub-cells");
+		GD.Print($"Harpoon TAP! Dir: ({_shotDirection.X:F2},{_shotDirection.Y:F2}), Range: {_targetRange}");
+	}
+
+	private void FireGuided()
+	{
+		_shotDirection = _tendril.LastMoveDirection;
+		if (_shotDirection.LengthSquared() < 0.01f)
+			_shotDirection = new Vector2(0, 1);
+		_shotDirection = _shotDirection.Normalized();
+
+		_targetRange = GuidedMaxRange;
+		_stepsPerTick = GuidedSubStepsPerTick;
+
+		InitializeShot();
+
+		_state = HarpoonState.Guided;
+		EmitSignal(SignalName.HarpoonFired, _targetRange);
+		GD.Print($"Harpoon GUIDED! Dir: ({_shotDirection.X:F2},{_shotDirection.Y:F2}), Range: {_targetRange}");
 	}
 
 	// =========================================================================
-	//  SHOOTING — DDA line trace through sub-grid
+	//  STRAIGHT EXTENDING — fast, no steering
 	// =========================================================================
 
-	private void ProcessShooting(float dt)
+	private void ProcessExtending(float dt)
 	{
 		_stepTimer -= dt;
 		if (_stepTimer > 0f) return;
-		_stepTimer = ShootStepDelay;
+		_stepTimer = TapStepDelay;
 
-		// Take multiple sub-steps per tick for fast extension
-		for (int i = 0; i < SubStepsPerTick; i++)
+		for (int i = 0; i < _stepsPerTick; i++)
 		{
 			if (!ExtendOneStep())
-				return; // Hit something or max range — already started retract
+				return;
 		}
 	}
 
-	/// <summary>
-	/// Advance the DDA by one sub-cell step.
-	/// Returns false if the harpoon should stop (hit wall, creature, or max range).
-	/// </summary>
+	// =========================================================================
+	//  GUIDED EXTENDING — slower, player steers with movement input
+	// =========================================================================
+
+	private void ProcessGuided(float dt)
+	{
+		if (!IsFireInputHeld())
+		{
+			GD.Print("Guided shot released, retracting.");
+			StartRetract();
+			return;
+		}
+
+		// Steer: rotate _shotDirection toward movement input
+		Vector2 steerInput = GetSteerInputVector();
+		if (steerInput.LengthSquared() > 0.01f)
+		{
+			Vector2 targetDir = steerInput.Normalized();
+
+			float currentAngle = Mathf.Atan2(_shotDirection.Y, _shotDirection.X);
+			float targetAngle = Mathf.Atan2(targetDir.Y, targetDir.X);
+
+			float maxTurn = GuidedTurnRate * dt;
+			float newAngle = Mathf.LerpAngle(currentAngle, targetAngle, Mathf.Clamp(maxTurn, 0f, 1f));
+
+			_shotDirection = new Vector2(Mathf.Cos(newAngle), Mathf.Sin(newAngle));
+		}
+
+		_stepTimer -= dt;
+		if (_stepTimer > 0f) return;
+		_stepTimer = GuidedStepDelay;
+
+		for (int i = 0; i < _stepsPerTick; i++)
+		{
+			if (!ExtendOneStep())
+				return;
+		}
+	}
+
+	// =========================================================================
+	//  DDA STEP — shared by both modes
+	// =========================================================================
+
 	private bool ExtendOneStep()
 	{
-		// Advance fractional position
 		_ddaX += _shotDirection.X;
 		_ddaY += _shotDirection.Y;
 
-		// Determine new integer sub-cell
 		int newSubX = Mathf.FloorToInt(_ddaX);
 		int newSubY = Mathf.FloorToInt(_ddaY);
 
-		// Skip if we haven't moved to a new sub-cell
 		if (newSubX == _currentSubX && newSubY == _currentSubY)
 			return true;
 
 		_currentSubX = newSubX;
 		_currentSubY = newSubY;
 
-		// Check terrain tile at this sub-cell
+		// Check terrain when crossing tile boundaries
 		var (terrainX, terrainY) = SubGridData.SubToTerrain(newSubX, newSubY);
-
 		bool newTerrainTile = (terrainX != _lastCheckedTerrainX || terrainY != _lastCheckedTerrainY);
 
 		if (newTerrainTile)
@@ -266,50 +328,109 @@ public partial class TendrilHarpoon : Node
 			_lastCheckedTerrainX = terrainX;
 			_lastCheckedTerrainY = terrainY;
 
-			// Check for creature hit
+			// Creature hit?
 			Creature hitCreature = _creatureManager?.GetCreatureAt(terrainX, terrainY);
 			if (hitCreature != null)
 			{
-				// Place this cell, then grab and retract
 				PlaceHarpoonCell(newSubX, newSubY);
 				_grabbedCreature = hitCreature;
-				GD.Print($"Harpoon grabbed {hitCreature.Species} at terrain ({terrainX},{terrainY})!");
+				GD.Print($"Harpoon grabbed {hitCreature.Species} at ({terrainX},{terrainY})!");
 				EmitSignal(SignalName.CreatureGrabbed, terrainX, terrainY);
 				StartRetract();
 				return false;
 			}
 
-			// Harpoon can only travel through air
+			// Wall hit? (harpoon only travels through air)
 			TileType tile = _chunkManager.GetTileAt(terrainX, terrainY);
 			if (tile != TileType.Air)
 			{
-				GD.Print($"Harpoon hit {tile} at terrain ({terrainX},{terrainY}), retracting.");
+				GD.Print($"Harpoon hit {tile} at ({terrainX},{terrainY}), retracting.");
 				StartRetract();
 				return false;
 			}
 		}
 
-		// Max range reached
+		// Max range?
 		if (_harpoonPath.Count >= _targetRange)
 		{
-			GD.Print("Harpoon reached max range, retracting.");
+			GD.Print("Harpoon max range, retracting.");
 			StartRetract();
 			return false;
 		}
 
-		// Place sub-cell
 		PlaceHarpoonCell(newSubX, newSubY);
 		return true;
 	}
 
+	// =========================================================================
+	//  HARPOON SHAPE — organic blob stamped at each path point
+	// =========================================================================
+
+	/// <summary>
+	/// Stamp an organic blob of sub-cells around a center point.
+	/// HarpoonThickness controls radius, ShapeIrregularity controls edge wobble.
+	/// At thickness 0, places a single sub-cell.
+	/// </summary>
 	private void PlaceHarpoonCell(int subX, int subY)
 	{
 		_harpoonPath.Add((subX, subY));
-		_tendril.SubGrid.SetCell(subX, subY, SubCellState.Core, 0, 220);
+
+		int r = HarpoonThickness;
+
+		if (r <= 0)
+		{
+			_tendril.SubGrid.SetCell(subX, subY, SubCellState.Core, 0, 220);
+			return;
+		}
+
+		for (int dy = -r; dy <= r; dy++)
+		{
+			for (int dx = -r; dx <= r; dx++)
+			{
+				float dist = Mathf.Sqrt(dx * dx + dy * dy);
+				if (dist > r) continue;
+
+				// Irregular edge — sine-based noise seeded by world position
+				float noise = Mathf.Sin((subX + dx) * 0.9f + (subY + dy) * 1.3f) * ShapeIrregularity;
+				if (dist + noise > r) continue;
+
+				int sx = subX + dx;
+				int sy = subY + dy;
+
+				// Intensity falls off toward edge for fleshy gradient
+				float edgeFade = 1f - Mathf.Clamp(dist / r, 0f, 1f);
+				byte intensity = (byte)(220 - (int)((1f - edgeFade) * 80));
+
+				_tendril.SubGrid.SetCell(sx, sy, SubCellState.Core, 0, intensity);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Clear the blob footprint at a path point. Must match PlaceHarpoonCell radius.
+	/// </summary>
+	private void ClearHarpoonCell(int subX, int subY)
+	{
+		int r = HarpoonThickness;
+
+		if (r <= 0)
+		{
+			_tendril.SubGrid.ClearCell(subX, subY);
+			return;
+		}
+
+		for (int dy = -r; dy <= r; dy++)
+		{
+			for (int dx = -r; dx <= r; dx++)
+			{
+				if (dx * dx + dy * dy <= r * r)
+					_tendril.SubGrid.ClearCell(subX + dx, subY + dy);
+			}
+		}
 	}
 
 	// =========================================================================
-	//  RETRACTING — remove sub-cells from tip back toward head
+	//  RETRACTING
 	// =========================================================================
 
 	private void StartRetract()
@@ -324,8 +445,7 @@ public partial class TendrilHarpoon : Node
 		if (_stepTimer > 0f) return;
 		_stepTimer = RetractStepDelay;
 
-		// Retract multiple steps per tick
-		for (int i = 0; i < SubStepsPerTick; i++)
+		for (int i = 0; i < RetractSubStepsPerTick; i++)
 		{
 			if (_harpoonPath.Count == 0)
 			{
@@ -333,20 +453,16 @@ public partial class TendrilHarpoon : Node
 				return;
 			}
 
-			// Remove the furthest cell (retract from tip toward head)
 			var (rx, ry) = _harpoonPath[^1];
 			_harpoonPath.RemoveAt(_harpoonPath.Count - 1);
+			ClearHarpoonCell(rx, ry);
 
-			// Clear the sub-cell
-			_tendril.SubGrid.ClearCell(rx, ry);
-
-			// If dragging a creature, move it along the retracting tip
+			// Drag creature along
 			if (_grabbedCreature != null && _grabbedCreature.IsAlive && _harpoonPath.Count > 0)
 			{
-				// Move creature to the terrain tile at the current retract tip
 				var (tipSubX, tipSubY) = _harpoonPath[^1];
-				var (terrainX, terrainY) = SubGridData.SubToTerrain(tipSubX, tipSubY);
-				_creatureManager?.ForceCreaturePosition(_grabbedCreature, terrainX, terrainY);
+				var (tx, ty) = SubGridData.SubToTerrain(tipSubX, tipSubY);
+				_creatureManager?.ForceCreaturePosition(_grabbedCreature, tx, ty);
 			}
 		}
 	}
@@ -374,7 +490,7 @@ public partial class TendrilHarpoon : Node
 	}
 
 	// =========================================================================
-	//  CAVE DETECTION — checks terrain tiles near the head for air
+	//  CAVE DETECTION
 	// =========================================================================
 
 	private bool IsNearCave()
@@ -396,8 +512,44 @@ public partial class TendrilHarpoon : Node
 	}
 
 	// =========================================================================
-	//  INPUT — Spacebar + R2 trigger with edge detection
+	//  INPUT
 	// =========================================================================
+
+	private Vector2 GetSteerInputVector()
+	{
+		int keyX = 0, keyY = 0;
+
+		if (Input.IsKeyPressed(Key.W) || Input.IsKeyPressed(Key.Up)) keyY -= 1;
+		if (Input.IsKeyPressed(Key.S) || Input.IsKeyPressed(Key.Down)) keyY += 1;
+		if (Input.IsKeyPressed(Key.A) || Input.IsKeyPressed(Key.Left)) keyX -= 1;
+		if (Input.IsKeyPressed(Key.D) || Input.IsKeyPressed(Key.Right)) keyX += 1;
+
+		Vector2 keyboard = new Vector2(keyX, keyY);
+		if (keyboard != Vector2.Zero)
+			keyboard = keyboard.Normalized();
+
+		Vector2 stick = Vector2.Zero;
+		var joypads = Input.GetConnectedJoypads();
+		if (joypads.Count > 0)
+		{
+			int joyId = joypads[0];
+			stick = new Vector2(
+				Input.GetJoyAxis(joyId, JoyAxis.LeftX),
+				Input.GetJoyAxis(joyId, JoyAxis.LeftY)
+			);
+			if (stick.Length() < StickDeadZone)
+				stick = Vector2.Zero;
+			else if (stick.Length() > 0f)
+			{
+				float norm = (stick.Length() - StickDeadZone) / (1f - StickDeadZone);
+				stick = stick.Normalized() * Mathf.Clamp(norm, 0f, 1f);
+			}
+		}
+
+		Vector2 combined = keyboard + stick;
+		if (combined.Length() > 1f) combined = combined.Normalized();
+		return combined;
+	}
 
 	private bool IsFireInputPressed()
 	{
