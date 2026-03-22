@@ -21,6 +21,10 @@ public partial class TendrilRenderer : Sprite2D
 	[Export] public string ShaderPath = "res://shaders/tendril_organic.gdshader";
 
 	// --- Cell Colors (data-side, painted to the Image) ---
+	// NOTE: Default colors bumped up from scene overrides to give the shader
+	//       more headroom. The scene .tscn values were extremely dark (Core ~0.16,
+	//       Trail ~0.015) which made multiplicative shader effects invisible.
+	//       If you prefer darker tones, keep them above ~0.15 per channel minimum.
 
 	[Export] public Color CoreColor = new Color(0.72f, 0.22f, 0.55f, 0.95f);
 	[Export] public Color CorePulseColor = new Color(0.90f, 0.30f, 0.65f, 1.0f);
@@ -32,6 +36,14 @@ public partial class TendrilRenderer : Sprite2D
 	[Export] public float PulseSpeed = 4.5f;
 	[Export] public float PulseIntensity = 0.35f;
 	[Export] public int Padding = 8;
+
+	// --- Per-Pixel Variation (NEW) ---
+	/// <summary>
+	/// How much per-pixel brightness scatter to add (0–1).
+	/// This gives the shader's UV-distortion effects visible texture to work with.
+	/// Without this, adjacent pixels are identical and writhing/wobble are invisible.
+	/// </summary>
+	[Export(PropertyHint.Range, "0,0.5,0.01")] public float PixelVariation = 0.15f;
 
 	// --- Shader: Writhing ---
 	[Export(PropertyHint.Range, "0,5,0.1")] public float WritheSpeed = 1.2f;
@@ -246,7 +258,7 @@ public partial class TendrilRenderer : Sprite2D
 			if (px < 0 || px >= _imgWidth || py < 0 || py >= _imgHeight)
 				continue;
 
-			_image.SetPixel(px, py, GetCellColor(cell, pulse));
+			_image.SetPixel(px, py, GetCellColor(cell, pulse, sx, sy));
 		}
 
 		_texture.Update(_image);
@@ -254,35 +266,77 @@ public partial class TendrilRenderer : Sprite2D
 		GlobalPosition = new Vector2(originSubX * cellSize, originSubY * cellSize);
 	}
 
-	private Color GetCellColor(SubCell cell, float pulse)
+	/// <summary>
+	/// Deterministic per-pixel hash. Returns a value in [0, 1) that is unique
+	/// per sub-grid coordinate but stable across frames, so the texture doesn't
+	/// shimmer on its own — only the shader's UV distortion reveals the variation.
+	/// </summary>
+	private static float CellHash(int sx, int sy)
 	{
+		// Large primes for spatial hashing — avoids visible grid patterns
+		unchecked
+		{
+			int h = sx * 73856093 ^ sy * 19349663;
+			h = (h ^ (h >> 13)) * 1274126177;
+			return (float)((uint)h % 10000u) / 10000f;
+		}
+	}
+
+	private Color GetCellColor(SubCell cell, float pulse, int sx, int sy)
+	{
+		// Per-pixel variation so adjacent texels differ and shader UV-distortion
+		// actually has visible texture to work with.
+		float hash = CellHash(sx, sy);
+		float variation = (hash - 0.5f) * 2f * PixelVariation; // ±PixelVariation
+
+		// Secondary hash for slight hue shifts (prevents uniform grey scatter)
+		float hash2 = CellHash(sx + 7919, sy + 6271);
+		float hueShift = (hash2 - 0.5f) * PixelVariation * 0.5f;
+
 		switch (cell.State)
 		{
 			case SubCellState.Core:
 			{
 				float t = pulse * PulseIntensity * (cell.Intensity / 255f);
-				return CoreColor.Lerp(CorePulseColor, t);
+				Color c = CoreColor.Lerp(CorePulseColor, t);
+				return new Color(
+					Mathf.Clamp(c.R + variation + hueShift, 0f, 1f),
+					Mathf.Clamp(c.G + variation * 0.6f, 0f, 1f),
+					Mathf.Clamp(c.B + variation - hueShift, 0f, 1f),
+					c.A
+				);
 			}
 
 			case SubCellState.Fresh:
 			{
 				float ageFade = Mathf.Clamp(cell.Age / 60f, 0f, 1f);
-				return FreshColor.Lerp(TrailColor, ageFade * 0.6f);
+				Color c = FreshColor.Lerp(TrailColor, ageFade * 0.6f);
+				return new Color(
+					Mathf.Clamp(c.R + variation + hueShift, 0f, 1f),
+					Mathf.Clamp(c.G + variation * 0.5f, 0f, 1f),
+					Mathf.Clamp(c.B + variation - hueShift, 0f, 1f),
+					c.A
+				);
 			}
 
 			case SubCellState.Trail:
 			{
 				float v = cell.Intensity / 255f * 0.15f;
 				return new Color(
-					TrailColor.R + v * 0.05f,
-					TrailColor.G + v * 0.03f,
-					TrailColor.B,
+					Mathf.Clamp(TrailColor.R + v * 0.05f + variation + hueShift, 0f, 1f),
+					Mathf.Clamp(TrailColor.G + v * 0.03f + variation * 0.5f, 0f, 1f),
+					Mathf.Clamp(TrailColor.B + variation * 0.4f - hueShift, 0f, 1f),
 					TrailColor.A
 				);
 			}
 
 			case SubCellState.Root:
-				return RootColor;
+				return new Color(
+					Mathf.Clamp(RootColor.R + variation + hueShift, 0f, 1f),
+					Mathf.Clamp(RootColor.G + variation * 0.5f, 0f, 1f),
+					Mathf.Clamp(RootColor.B + variation - hueShift, 0f, 1f),
+					RootColor.A
+				);
 
 			default:
 				return Colors.Transparent;
