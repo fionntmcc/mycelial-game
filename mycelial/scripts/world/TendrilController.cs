@@ -105,6 +105,16 @@ public partial class TendrilController : Node2D
 	/// <summary>Current movement direction for external systems (fog cone, harpoon, etc).</summary>
 	public Vector2 LastMoveDirection => _lastMoveDir;
 
+	/// <summary>Current movement speed (0–1) for camera shake scaling.</summary>
+	public float CurrentSpeed => Mathf.Clamp(_momentum.Length(), 0f, 1f);
+
+	/// <summary>
+	/// Collision impulse for the camera. Set when the tendril hits a wall,
+	/// points in the direction of the blocked movement. Magnitude = impact force.
+	/// Decays to zero each frame — the camera reads and consumes it.
+	/// </summary>
+	public Vector2 CollisionImpulse { get; private set; }
+
 	// =========================================================================
 	//  ROOT TIP GROWTH (same structures as before — operates on terrain tiles)
 	// =========================================================================
@@ -309,6 +319,9 @@ public partial class TendrilController : Node2D
 		float dt = (float)delta;
 		_blobAnimTime += dt * BlobAnimSpeed;
 
+		// Decay collision impulse — camera reads this, then it fades out
+		CollisionImpulse = CollisionImpulse.MoveToward(Vector2.Zero, 8f * dt);
+
 		// Ramp undulation amplitude based on movement speed
 		float targetAmplitude = (_momentum.Length() > MomentumDeadZone) ? UndulationAmplitude : 0f;
 		_undulationAmplitudeCur = Mathf.MoveToward(_undulationAmplitudeCur, targetAmplitude, UndulationRampSpeed * dt);
@@ -477,7 +490,11 @@ public partial class TendrilController : Node2D
 				}
 			}
 
-			// Fully blocked
+			// Fully blocked — record collision for camera shake
+			Vector2 blockedDir = new Vector2(stepX, stepY).Normalized();
+			float impactForce = _momentum.Length();
+			CollisionImpulse = blockedDir * impactForce;
+
 			_moveAccumulator *= 0.35f;
 			_momentum *= BlockedMomentumDamping;
 			break;
@@ -504,9 +521,12 @@ public partial class TendrilController : Node2D
 			if (centerTile == TileType.Air)
 				return false;
 
-			// Can't move into unbreakable solids
+			// Can't move into unbreakable solids — but the Origin Tree is home
 			if (TileProperties.Is(centerTile, TileFlags.Solid) && !TileProperties.Is(centerTile, TileFlags.Breakable))
-				return false;
+			{
+				if (!_treeTiles.Contains(PackCoords(terrainX, terrainY)))
+					return false;
+			}
 
 			if (TileProperties.Is(centerTile, TileFlags.Liquid))
 				return false;
@@ -516,16 +536,19 @@ public partial class TendrilController : Node2D
 
 			// Calculate hunger cost
 			bool isOwnTerritory = _claimedTiles.Contains(PackCoords(terrainX, terrainY));
+			bool isTreeTile = _treeTiles.Contains(PackCoords(terrainX, terrainY));
 			float cost;
 
 			if (isOwnTerritory)
 				cost = HungerOnCorrupted;
+			else if (isTreeTile)
+				cost = HungerOnCorrupted; // Tree is home — nearly free to traverse
 			else if (IsHardTile(centerTile))
 				cost = HungerPerHardMove;
 			else
 				cost = HungerPerMove;
 
-			if (Hunger - cost <= 0 && !isOwnTerritory)
+			if (Hunger - cost <= 0 && !isOwnTerritory && !isTreeTile)
 			{
 				StartRetreat();
 				return false;

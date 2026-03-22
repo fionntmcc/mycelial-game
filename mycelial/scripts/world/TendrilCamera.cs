@@ -3,17 +3,27 @@ namespace Mycorrhiza.World;
 using Godot;
 
 /// <summary>
-/// Camera that follows the tendril with smooth tracking, screenshake, and dynamic zoom.
+/// Camera that follows the tendril head with smooth tracking, screen shake,
+/// and look-ahead.
 ///
-/// UPDATED with:
-///   - Screenshake on wall impacts (proportional to impact force)
-///   - Speed-based zoom drift (zooms out slightly when moving fast)
-///   - Subtle look-ahead (camera drifts in the direction of movement)
-///   - Impact freeze-frame (tiny pause on hard wall hits for punch)
+/// Three layered effects on top of the base follow:
+///
+///   1. LOOK-AHEAD — the camera leads slightly in the movement direction so the
+///      player can see what's coming. Smoothly ramps up/down with speed.
+///
+///   2. MOVEMENT SHAKE — subtle organic tremor while burrowing. Driven by
+///      Simplex noise (not random jitter) so it feels like vibration through
+///      earth, not camera malfunction. Scales with speed.
+///
+///   3. COLLISION SHAKE — aggressive, directional. When the tendril hits a wall
+///      the camera punches in the direction of impact and springs back.
+///      Uses exponential decay with a high-frequency sine wobble.
+///
+/// All offsets are additive and combined each frame before pixel-snapping.
 ///
 /// SETUP:
 ///   - Attach to a Camera2D node
-///   - Assign TendrilControllerPath
+///   - Assign TendrilControllerPath to your TendrilController node
 ///   - Enable "Current" on the Camera2D
 /// </summary>
 public partial class TendrilCamera : Camera2D
@@ -21,88 +31,61 @@ public partial class TendrilCamera : Camera2D
 	[Export] public NodePath TendrilControllerPath { get; set; }
 	[Export] public bool PixelPerfectMode = true;
 
-	[ExportGroup("Follow")]
+	// --- Base Follow ---
 	[Export] public float FollowSpeed = 8.0f;
-
-	/// <summary>How far ahead of the tendril the camera looks (pixels).</summary>
-	[Export] public float LookAheadDistance = 24f;
-
-	/// <summary>How fast the look-ahead adjusts to direction changes.</summary>
-	[Export] public float LookAheadSmoothing = 4.0f;
-
-	[ExportGroup("Zoom")]
 	[Export] public float ZoomSpeed = 0.1f;
 	[Export] public float MinZoom = 0.2f;
 	[Export] public float MaxZoom = 4.0f;
 	[Export] public float DefaultZoom = 1.0f;
 
-	/// <summary>How much the camera zooms out at max speed (additive).</summary>
-	[Export] public float SpeedZoomOutAmount = 0.15f;
+	// --- Look-Ahead ---
+	/// <summary>Max pixels the camera leads ahead of the tendril in the movement direction.</summary>
+	[Export] public float LookAheadDistance = 40.0f;
 
-	/// <summary>Speed (px/sec) at which max zoom-out is reached.</summary>
-	[Export] public float SpeedZoomOutMaxSpeed = 350f;
+	/// <summary>How fast the look-ahead offset catches up to the target (per second).</summary>
+	[Export] public float LookAheadSmoothing = 3.5f;
 
-	/// <summary>How fast zoom adjusts to speed changes.</summary>
-	[Export] public float ZoomDriftSmoothing = 3.0f;
+	// --- Movement Shake ---
+	/// <summary>Max shake offset in pixels at full speed.</summary>
+	[Export] public float MoveShakeIntensity = 1.2f;
 
-	[ExportGroup("Screenshake")]
+	/// <summary>Noise sampling speed — higher = faster tremor.</summary>
+	[Export] public float MoveShakeSpeed = 12.0f;
 
-	/// <summary>Enable screenshake on wall impacts.</summary>
-	[Export] public bool EnableScreenshake = true;
+	// --- Collision Shake ---
+	/// <summary>Max shake offset in pixels on a full-speed impact.</summary>
+	[Export] public float CollisionShakeIntensity = 6.0f;
 
-	/// <summary>Max shake offset in pixels for the hardest impacts.</summary>
-	[Export] public float MaxShakeAmplitude = 4.0f;
+	/// <summary>How fast the collision shake decays (higher = shorter shake).</summary>
+	[Export] public float CollisionShakeDecay = 10.0f;
 
-	/// <summary>How fast shake decays (higher = shorter shakes).</summary>
-	[Export] public float ShakeDecayRate = 12.0f;
+	/// <summary>Oscillation frequency of the collision shake (Hz).</summary>
+	[Export] public float CollisionShakeFrequency = 30.0f;
 
-	/// <summary>Frequency of shake oscillation in Hz.</summary>
-	[Export] public float ShakeFrequency = 30.0f;
+	/// <summary>How much of the collision shake is directional vs perpendicular (0–1).
+	/// 1.0 = purely along the impact direction. 0.5 = equal both axes.</summary>
+	[Export] public float CollisionDirectionalBias = 0.7f;
 
-	/// <summary>Min speed delta to trigger screenshake (filters out gentle slides).</summary>
-	[Export] public float ShakeMinImpactSpeed = 80.0f;
-
-	[ExportGroup("Impact Freeze")]
-
-	/// <summary>Enable tiny time-freeze on hard wall impacts (adds punch).</summary>
-	[Export] public bool EnableImpactFreeze = true;
-
-	/// <summary>Duration of freeze in seconds (very short — 0.03-0.06 feels good).</summary>
-	[Export] public float ImpactFreezeDuration = 0.04f;
-
-	/// <summary>Min impact speed to trigger freeze (only hard hits).</summary>
-	[Export] public float ImpactFreezeMinSpeed = 150f;
-
-	// =========================================================================
-	//  INTERNAL STATE
-	// =========================================================================
-
+	// --- Pixel-Perfect Zoom Levels ---
 	private static readonly float[] PixelPerfectZoomLevels = { 0.5f, 1.0f, 2.0f, 3.0f, 4.0f };
 
+	// --- State ---
 	private TendrilController _tendril;
-	private TendrilHead _head;
-
 	private Vector2 _targetPosition;
 	private int _zoomLevelIndex = 1;
 
-	// Screenshake
-	private float _shakeIntensity;
-	private float _shakeTimer;
-	private Vector2 _shakeOffset;
-
-	// Speed zoom
-	private float _currentZoomDrift;
-	private float _baseZoom;
-
 	// Look-ahead
-	private Vector2 _lookAheadOffset;
+	private Vector2 _lookAheadOffset;       // Current smoothed offset
+	private Vector2 _lookAheadTarget;        // Where we want to be
 
-	// Impact freeze
-	private float _freezeTimer;
+	// Movement shake
+	private FastNoiseLite _shakeNoise;
+	private float _shakeTime;
 
-	// Previous frame speed for detecting impacts
-	private float _prevSpeed;
-	private bool _prevSliding;
+	// Collision shake
+	private Vector2 _collisionDir;           // Direction of last impact (normalized)
+	private float _collisionMagnitude;       // Current shake magnitude (decays to 0)
+	private float _collisionPhase;           // Oscillation phase
 
 	public override void _Ready()
 	{
@@ -113,17 +96,24 @@ public partial class TendrilCamera : Camera2D
 			TextureFilter = TextureFilterEnum.Nearest;
 
 		_zoomLevelIndex = FindNearestZoomIndex(Mathf.Clamp(DefaultZoom, MinZoom, MaxZoom));
-		_baseZoom = PixelPerfectMode
+		float startZoom = PixelPerfectMode
 			? PixelPerfectZoomLevels[_zoomLevelIndex]
 			: DefaultZoom;
 
-		Zoom = new Vector2(_baseZoom, _baseZoom);
+		Zoom = new Vector2(startZoom, startZoom);
 		MakeCurrent();
+
+		// Initialize shake noise — Simplex gives smooth, organic variation
+		_shakeNoise = new FastNoiseLite();
+		_shakeNoise.NoiseType = FastNoiseLite.NoiseTypeEnum.Simplex;
+		_shakeNoise.Frequency = 0.8f;
+		_shakeNoise.Seed = (int)(GD.Randi() % int.MaxValue);
 
 		if (_tendril != null)
 		{
 			_targetPosition = new Vector2(
-				WorldConfig.TreeWorldX * WorldConfig.TileSize, 0
+				WorldConfig.TreeWorldX * WorldConfig.TileSize,
+				0
 			);
 			GlobalPosition = _targetPosition;
 		}
@@ -132,178 +122,105 @@ public partial class TendrilCamera : Camera2D
 	public override void _Process(double delta)
 	{
 		if (_tendril == null) return;
+
 		float dt = (float)delta;
 
-		// Try to find TendrilHead if we haven't yet
-		_head ??= _tendril.GetNodeOrNull<TendrilHead>("TendrilHead");
+		// =====================================================================
+		//  BASE TARGET — tendril head pixel position
+		// =====================================================================
+		_targetPosition = _tendril.GetHeadPixelPosition();
 
-		// --- Impact freeze ---
-		if (_freezeTimer > 0)
+		// =====================================================================
+		//  LOOK-AHEAD — lead the camera in the movement direction
+		// =====================================================================
+		float speed = _tendril.CurrentSpeed;
+		Vector2 moveDir = _tendril.LastMoveDirection;
+
+		// Target offset scales with speed so it's zero when stopped
+		_lookAheadTarget = moveDir * LookAheadDistance * speed;
+
+		// Smooth interpolation so look-ahead doesn't jerk on direction changes
+		_lookAheadOffset = _lookAheadOffset.Lerp(_lookAheadTarget, LookAheadSmoothing * dt);
+
+		// =====================================================================
+		//  MOVEMENT SHAKE — subtle noise-based tremor while burrowing
+		// =====================================================================
+		_shakeTime += dt * MoveShakeSpeed;
+
+		// Sample 2D Simplex noise at offset positions for X and Y independently.
+		// The 100-unit separation prevents correlation between axes.
+		float shakeX = _shakeNoise.GetNoise2D(_shakeTime, 0f) * MoveShakeIntensity * speed;
+		float shakeY = _shakeNoise.GetNoise2D(0f, _shakeTime + 100f) * MoveShakeIntensity * speed;
+		Vector2 moveShakeOffset = new Vector2(shakeX, shakeY);
+
+		// =====================================================================
+		//  COLLISION SHAKE — directional punch on impact
+		// =====================================================================
+		Vector2 collisionShakeOffset = Vector2.Zero;
+
+		// Check for new collision from the tendril
+		Vector2 impulse = _tendril.CollisionImpulse;
+		if (impulse.Length() > 0.05f)
 		{
-			_freezeTimer -= dt;
-			// During freeze, don't update camera position (creates a brief "hit" feel)
-			// Still decay shake so it's ready when freeze ends
-			UpdateShake(dt);
-			ApplyShakeOffset();
-			return;
+			// New impact — stronger impulse = bigger shake
+			float newMagnitude = impulse.Length() * CollisionShakeIntensity;
+
+			// Only override if this impact is stronger than the current decay
+			if (newMagnitude > _collisionMagnitude * 0.5f)
+			{
+				_collisionDir = impulse.Normalized();
+				_collisionMagnitude = newMagnitude;
+				_collisionPhase = 0f;
+			}
 		}
 
-		// --- Detect wall impacts ---
-		if (_head != null && EnableScreenshake)
-			DetectWallImpacts();
-
-		// --- Target position with look-ahead ---
-		Vector2 headPos = _tendril.GetHeadPixelPosition();
-
-		if (_head != null && _head.Speed > 20f)
+		if (_collisionMagnitude > 0.01f)
 		{
-			Vector2 moveDir = _head.Velocity.Normalized();
-			Vector2 targetLookAhead = moveDir * LookAheadDistance;
-			_lookAheadOffset = _lookAheadOffset.Lerp(targetLookAhead, LookAheadSmoothing * dt);
+			_collisionPhase += dt * CollisionShakeFrequency * Mathf.Tau;
+
+			// Exponential decay for a sharp initial punch that fades fast
+			_collisionMagnitude *= Mathf.Exp(-CollisionShakeDecay * dt);
+
+			// Oscillate along impact direction (primary) and perpendicular (secondary)
+			float primaryOsc = Mathf.Sin(_collisionPhase);
+			float secondaryOsc = Mathf.Cos(_collisionPhase * 1.3f); // Slightly different freq
+
+			Vector2 perpDir = new Vector2(-_collisionDir.Y, _collisionDir.X);
+
+			collisionShakeOffset =
+				_collisionDir * primaryOsc * _collisionMagnitude * CollisionDirectionalBias
+				+ perpDir * secondaryOsc * _collisionMagnitude * (1f - CollisionDirectionalBias);
 		}
 		else
 		{
-			_lookAheadOffset = _lookAheadOffset.Lerp(Vector2.Zero, LookAheadSmoothing * dt);
+			_collisionMagnitude = 0f;
 		}
 
-		_targetPosition = headPos + _lookAheadOffset;
+		// =====================================================================
+		//  COMBINE — base position + all offsets
+		// =====================================================================
+		Vector2 finalTarget = _targetPosition + _lookAheadOffset + moveShakeOffset + collisionShakeOffset;
 
-		// --- Smooth follow ---
-		Vector2 next = GlobalPosition.Lerp(_targetPosition, FollowSpeed * dt);
+		// Smooth follow toward the combined target
+		Vector2 next = GlobalPosition.Lerp(finalTarget, FollowSpeed * dt);
 
-		// --- Speed-based zoom drift ---
-		float currentSpeed = _head?.Speed ?? 0f;
-		float targetZoomDrift = 0f;
-		if (currentSpeed > 10f)
+		if (!PixelPerfectMode)
 		{
-			float speedT = Mathf.Clamp(currentSpeed / SpeedZoomOutMaxSpeed, 0f, 1f);
-			speedT = speedT * speedT; // Ease-in so gentle movement barely zooms
-			targetZoomDrift = -SpeedZoomOutAmount * speedT; // Negative = zoom out
-		}
-		_currentZoomDrift = Mathf.Lerp(_currentZoomDrift, targetZoomDrift, ZoomDriftSmoothing * dt);
-
-		float effectiveZoom = _baseZoom + _currentZoomDrift;
-		effectiveZoom = Mathf.Clamp(effectiveZoom, MinZoom, MaxZoom);
-		Zoom = new Vector2(effectiveZoom, effectiveZoom);
-
-		// --- Screenshake ---
-		UpdateShake(dt);
-		next += _shakeOffset;
-
-		// --- Pixel-perfect snapping ---
-		if (PixelPerfectMode)
-		{
-			float snapStep = 1.0f / Mathf.Max(effectiveZoom, 0.0001f);
-			next = new Vector2(
-				Mathf.Snapped(next.X, snapStep),
-				Mathf.Snapped(next.Y, snapStep)
-			);
-		}
-
-		GlobalPosition = next;
-
-		// Cache for next frame
-		_prevSpeed = currentSpeed;
-		_prevSliding = _head?.IsSlidingAlongWall ?? false;
-	}
-
-	// =========================================================================
-	//  SCREENSHAKE
-	// =========================================================================
-
-	private void DetectWallImpacts()
-	{
-		if (_head == null) return;
-
-		float currentSpeed = _head.Speed;
-		bool currentlySliding = _head.IsSlidingAlongWall;
-
-		// Trigger shake when: just started sliding AND lost significant speed
-		if (currentlySliding && !_prevSliding)
-		{
-			float speedLost = _prevSpeed - currentSpeed;
-			if (speedLost > ShakeMinImpactSpeed)
-			{
-				float impactForce = Mathf.Clamp(speedLost / 300f, 0f, 1f);
-				TriggerShake(impactForce);
-
-				// Impact freeze for hard hits
-				if (EnableImpactFreeze && speedLost > ImpactFreezeMinSpeed)
-				{
-					_freezeTimer = ImpactFreezeDuration;
-				}
-			}
-		}
-	}
-
-	/// <summary>
-	/// Trigger screenshake. Intensity 0-1, where 1 = MaxShakeAmplitude.
-	/// Can be called externally (e.g., creature damage, explosions).
-	/// </summary>
-	public void TriggerShake(float intensity)
-	{
-		// Only override if this shake is stronger than the current one
-		float newIntensity = Mathf.Clamp(intensity, 0f, 1f);
-		if (newIntensity > _shakeIntensity)
-		{
-			_shakeIntensity = newIntensity;
-			_shakeTimer = 0f;
-		}
-	}
-
-	private void UpdateShake(float dt)
-	{
-		if (_shakeIntensity <= 0.01f)
-		{
-			_shakeIntensity = 0f;
-			_shakeOffset = Vector2.Zero;
+			GlobalPosition = next;
 			return;
 		}
 
-		_shakeTimer += dt;
-
-		// Decaying sinusoidal shake
-		float decay = Mathf.Exp(-ShakeDecayRate * _shakeTimer);
-		float amplitude = MaxShakeAmplitude * _shakeIntensity * decay;
-
-		float angle = _shakeTimer * ShakeFrequency * Mathf.Tau;
-		_shakeOffset = new Vector2(
-			Mathf.Sin(angle) * amplitude,
-			Mathf.Cos(angle * 1.3f) * amplitude * 0.7f // Slightly different Y frequency
+		// Pixel-perfect snapping
+		float snapStep = 1.0f / Mathf.Max(Zoom.X, 0.0001f);
+		GlobalPosition = new Vector2(
+			Mathf.Snapped(next.X, snapStep),
+			Mathf.Snapped(next.Y, snapStep)
 		);
-
-		// Kill shake when it's imperceptible
-		if (amplitude < 0.1f)
-		{
-			_shakeIntensity = 0f;
-			_shakeOffset = Vector2.Zero;
-		}
 	}
-
-	private void ApplyShakeOffset()
-	{
-		// Used during freeze frames to keep shake visible
-		if (_shakeOffset.LengthSquared() > 0.01f)
-		{
-			Vector2 pos = GlobalPosition + _shakeOffset;
-			if (PixelPerfectMode)
-			{
-				float snapStep = 1.0f / Mathf.Max(Zoom.X, 0.0001f);
-				pos = new Vector2(
-					Mathf.Snapped(pos.X, snapStep),
-					Mathf.Snapped(pos.Y, snapStep)
-				);
-			}
-			GlobalPosition = pos;
-		}
-	}
-
-	// =========================================================================
-	//  ZOOM CONTROLS
-	// =========================================================================
 
 	public override void _UnhandledInput(InputEvent @event)
 	{
+		// Zoom with scroll wheel
 		if (@event is InputEventMouseButton mouseEvent && mouseEvent.Pressed)
 		{
 			if (PixelPerfectMode)
@@ -313,17 +230,20 @@ public partial class TendrilCamera : Camera2D
 				else if (mouseEvent.ButtonIndex == MouseButton.WheelDown)
 					_zoomLevelIndex = System.Math.Max(_zoomLevelIndex - 1, 0);
 
-				_baseZoom = PixelPerfectZoomLevels[_zoomLevelIndex];
+				float newZoomLevel = PixelPerfectZoomLevels[_zoomLevelIndex];
+				Zoom = new Vector2(newZoomLevel, newZoomLevel);
 				return;
 			}
 
-			float newZoom = _baseZoom;
+			float newZoom = Zoom.X;
+
 			if (mouseEvent.ButtonIndex == MouseButton.WheelUp)
 				newZoom += ZoomSpeed;
 			else if (mouseEvent.ButtonIndex == MouseButton.WheelDown)
 				newZoom -= ZoomSpeed;
 
-			_baseZoom = Mathf.Clamp(newZoom, MinZoom, MaxZoom);
+			newZoom = Mathf.Clamp(newZoom, MinZoom, MaxZoom);
+			Zoom = new Vector2(newZoom, newZoom);
 		}
 	}
 
@@ -331,13 +251,20 @@ public partial class TendrilCamera : Camera2D
 	{
 		int best = 0;
 		float bestDiff = float.MaxValue;
+
 		for (int i = 0; i < PixelPerfectZoomLevels.Length; i++)
 		{
 			float z = PixelPerfectZoomLevels[i];
 			if (z < MinZoom || z > MaxZoom) continue;
+
 			float diff = Mathf.Abs(targetZoom - z);
-			if (diff < bestDiff) { bestDiff = diff; best = i; }
+			if (diff < bestDiff)
+			{
+				bestDiff = diff;
+				best = i;
+			}
 		}
+
 		return best;
 	}
 }

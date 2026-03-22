@@ -15,15 +15,15 @@
 
 [node name="World" type="Node2D" unique_id=185312821]
 
-[node name="Camera2D" type="Camera2D" parent="." unique_id=1324047441]
+[node name="TendrilCamera" type="Camera2D" parent="." unique_id=1324047441]
 script = ExtResource("1_71j4m")
 TendrilControllerPath = NodePath("../TendrilController")
-SpeedZoomOutAmount = 0.45
-MaxShakeAmplitude = 15.0
+MoveShakeIntensity = 3.0
+CollisionShakeIntensity = 10.0
 
 [node name="ChunkManager" type="Node2D" parent="." unique_id=23384488]
 script = ExtResource("2_k0juu")
-CameraPath = NodePath("../Camera2D")
+CameraPath = NodePath("../TendrilCamera")
 TileSetResource = ExtResource("3_71j4m")
 
 [node name="HUD" type="CanvasLayer" parent="." unique_id=426077501]
@@ -70,7 +70,7 @@ TendrilControllerPath = NodePath("../TendrilController")
 [node name="TendrilRenderer" type="Sprite2D" parent="." unique_id=1224740282]
 script = ExtResource("11_e3hyu")
 TendrilControllerPath = NodePath("../TendrilController")
-CameraPath = NodePath("../Camera2D")
+CameraPath = NodePath("../TendrilCamera")
 CoreColor = Color(0.16078432, 0.050980393, 0.14117648, 0.9490196)
 CorePulseColor = Color(0.16078432, 0.050980393, 0.11372549, 1)
 FreshColor = Color(0.16078432, 0.050980393, 0.11372549, 1)
@@ -80,7 +80,7 @@ RootColor = Color(0.21176471, 0.08235294, 0.19607843, 0.7019608)
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=957335522]
 script = ExtResource("9_fog01")
 TendrilControllerPath = NodePath("../TendrilController")
-CameraPath = NodePath("../Camera2D")
+CameraPath = NodePath("../TendrilCamera")
 ChunkManagerPath = NodePath("../ChunkManager")
 CoreLightEmission = 3.0
 FreshLightEmission = 2.0
