@@ -4,13 +4,38 @@ using Godot;
 
 /// <summary>
 /// Renders the tendril sub-grid as a single ImageTexture on a Sprite2D,
-/// with an organic shader for writhing, mottling, veins, edge wobble, and pulse waves.
+/// with an organic shader driven by HSV pulse waves and movement reactivity.
 ///
 /// SETUP (Godot Editor):
 ///   1. Add a Sprite2D node as a child of your World scene
 ///   2. Attach this script to it
 ///   3. Set TendrilControllerPath and CameraPath in the inspector
 ///   4. Place the shader file at res://shaders/tendril_organic.gdshader
+///
+/// TUNING GUIDE (inspector params):
+///
+///   --- To make the pulse MORE / LESS visible ---
+///   ValShiftRange:       brightness swing. 0.4 = dramatic, 0.1 = subtle.
+///                        THIS IS THE SINGLE MOST VISIBLE KNOB.
+///   HueShiftRange:       hue rotation. 0.15 = purple↔pink↔blue cycling.
+///                        0.05 = barely noticeable, 0.3 = psychedelic.
+///   SatShiftRange:       saturation. 0.15 = nice pop, 0.3 = neon.
+///   IdlePulseStrength:   how much the tendril breathes at rest.
+///                        0.35 = clearly alive, 0.0 = dead when still.
+///   MovePulseBoost:      how much movement amplifies pulse ON TOP of idle.
+///                        0.65 = dramatic ramp-up, 0.3 = gentle.
+///
+///   --- To change the wave shape ---
+///   HueWaveSpeed:        how fast the wave travels. 3.0 = brisk, 1.0 = lazy.
+///   HueWaveLength:       pixels per cycle. 30 = tight ripples, 100 = broad wash.
+///
+///   --- To change writhing/wobble ---
+///   WritheStrength:      UV distortion amount. 5 = subtle, 15 = aggressive.
+///   EdgeWobbleStrength:  edge breathing. 3 = gentle, 8 = very wobbly.
+///
+///   --- Color palette ---
+///   Tweak CoreColor / TrailColor etc to shift the base tones.
+///   The HSV pulse modulates ON TOP of whatever base colors you set.
 /// </summary>
 public partial class TendrilRenderer : Sprite2D
 {
@@ -20,30 +45,36 @@ public partial class TendrilRenderer : Sprite2D
 	// --- Shader Path ---
 	[Export] public string ShaderPath = "res://shaders/tendril_organic.gdshader";
 
-	// --- Cell Colors (data-side, painted to the Image) ---
-	// NOTE: Default colors bumped up from scene overrides to give the shader
-	//       more headroom. The scene .tscn values were extremely dark (Core ~0.16,
-	//       Trail ~0.015) which made multiplicative shader effects invisible.
-	//       If you prefer darker tones, keep them above ~0.15 per channel minimum.
-
-	[Export] public Color CoreColor = new Color(0.72f, 0.22f, 0.55f, 0.95f);
-	[Export] public Color CorePulseColor = new Color(0.90f, 0.30f, 0.65f, 1.0f);
-	[Export] public Color FreshColor = new Color(0.40f, 0.15f, 0.35f, 0.88f);
-	[Export] public Color TrailColor = new Color(0.22f, 0.10f, 0.20f, 0.82f);
-	[Export] public Color RootColor = new Color(0.15f, 0.06f, 0.14f, 0.70f);
+	// --- Cell Colors (purple palette) ---
+	[Export] public Color CoreColor      = new Color(0.62f, 0.58f, 0.68f, 0.95f);  // #9E94AE
+	[Export] public Color CorePulseColor = new Color(0.78f, 0.70f, 0.85f, 1.0f);   // #C7B3D9
+	[Export] public Color FreshColor     = new Color(0.49f, 0.46f, 0.53f, 0.90f);  // #7D7688
+	[Export] public Color TrailColor     = new Color(0.41f, 0.35f, 0.46f, 0.85f);  // #695A75
+	[Export] public Color RootColor      = new Color(0.25f, 0.18f, 0.30f, 0.72f);  // #402E4D
 	[Export] public int AuraRadius = 2;
-	[Export] public Color AuraColor = new Color(0.55f, 0.15f, 0.45f, 0.25f);
+	[Export] public Color AuraColor      = new Color(0.35f, 0.22f, 0.44f, 0.22f);  // #5A3870
 	[Export] public float PulseSpeed = 4.5f;
 	[Export] public float PulseIntensity = 0.35f;
 	[Export] public int Padding = 8;
 
-	// --- Per-Pixel Variation (NEW) ---
-	/// <summary>
-	/// How much per-pixel brightness scatter to add (0–1).
-	/// This gives the shader's UV-distortion effects visible texture to work with.
-	/// Without this, adjacent pixels are identical and writhing/wobble are invisible.
-	/// </summary>
-	[Export(PropertyHint.Range, "0,0.5,0.01")] public float PixelVariation = 0.15f;
+	// --- Per-Pixel Variation ---
+	[Export(PropertyHint.Range, "0,0.5,0.01")] public float PixelVariation = 0.12f;
+
+	// --- Shader: HSV Pulse Wave (THE BIG KNOBS) ---
+	/// <summary>How fast the color wave ripples along the tendril.</summary>
+	[Export(PropertyHint.Range, "0,8,0.1")] public float HueWaveSpeed = 3.0f;
+	/// <summary>Pixels per wave cycle. Lower = tighter ripples.</summary>
+	[Export(PropertyHint.Range, "5,200,1")] public float HueWaveLength = 30.0f;
+	/// <summary>How far the hue rotates (±). 0.15 = purple↔pink↔blue.</summary>
+	[Export(PropertyHint.Range, "0,0.5,0.01")] public float HueShiftRange = 0.15f;
+	/// <summary>Brightness oscillation at peak. 0.4 = VERY visible.</summary>
+	[Export(PropertyHint.Range, "0,0.8,0.01")] public float ValShiftRange = 0.40f;
+	/// <summary>Saturation oscillation at peak.</summary>
+	[Export(PropertyHint.Range, "0,0.5,0.01")] public float SatShiftRange = 0.15f;
+	/// <summary>Pulse strength when completely idle (the "breathing").</summary>
+	[Export(PropertyHint.Range, "0,1,0.01")] public float IdlePulseStrength = 0.35f;
+	/// <summary>Additional pulse intensity from movement (stacks on idle).</summary>
+	[Export(PropertyHint.Range, "0,1,0.01")] public float MovePulseBoost = 0.65f;
 
 	// --- Shader: Writhing ---
 	[Export(PropertyHint.Range, "0,5,0.1")] public float WritheSpeed = 1.2f;
@@ -53,11 +84,6 @@ public partial class TendrilRenderer : Sprite2D
 	// --- Shader: Color Mottling ---
 	[Export(PropertyHint.Range, "0,1,0.01")] public float MottleStrength = 0.35f;
 	[Export(PropertyHint.Range, "0.5,30,0.5")] public float MottleScale = 5.0f;
-
-	// --- Shader: Pulse Wave ---
-	[Export(PropertyHint.Range, "0,10,0.1")] public float ShaderPulseSpeed = 2.0f;
-	[Export(PropertyHint.Range, "0,1,0.01")] public float ShaderPulseStrength = 0.4f;
-	[Export(PropertyHint.Range, "5,200,1")] public float ShaderPulseWavelength = 40.0f;
 
 	// --- Shader: Edge Wobble ---
 	[Export(PropertyHint.Range, "0,5,0.1")] public float EdgeWobbleSpeed = 1.5f;
@@ -69,6 +95,11 @@ public partial class TendrilRenderer : Sprite2D
 	[Export(PropertyHint.Range, "1,30,0.5")] public float VeinScale = 4.0f;
 	[Export(PropertyHint.Range, "0,3,0.1")] public float VeinSpeed = 0.3f;
 
+	// --- Movement Reactivity ---
+	[Export(PropertyHint.Range, "0,1,0.05")] public float MovementReactivity = 0.75f;
+	[Export(PropertyHint.Range, "0,0.5,0.01")] public float IdleActivityFloor = 0.15f;
+	[Export(PropertyHint.Range, "1,15,0.5")] public float SpeedSmoothing = 4.0f;
+
 	private TendrilController _tendril;
 	private Camera2D _camera;
 	private float _pulseTimer;
@@ -79,6 +110,9 @@ public partial class TendrilRenderer : Sprite2D
 	private int _imgWidth;
 	private int _imgHeight;
 	private float _lastZoom;
+
+	private float _smoothedSpeed;
+	private Vector2 _smoothedDir;
 
 	public override void _Ready()
 	{
@@ -102,6 +136,9 @@ public partial class TendrilRenderer : Sprite2D
 
 		ZAsRelative = false;
 		ZIndex = 100;
+
+		_smoothedSpeed = 0f;
+		_smoothedDir = Vector2.Down;
 
 		SetupShader();
 
@@ -131,30 +168,63 @@ public partial class TendrilRenderer : Sprite2D
 	{
 		if (_shaderMat == null) return;
 
-		// Pass actual image dimensions — shader can't reliably use textureSize()
 		_shaderMat.SetShaderParameter("tex_size", new Vector2(_imgWidth, _imgHeight));
 
+		// HSV pulse wave
+		_shaderMat.SetShaderParameter("hue_wave_speed", HueWaveSpeed);
+		_shaderMat.SetShaderParameter("hue_wave_length", HueWaveLength);
+		_shaderMat.SetShaderParameter("hue_shift_range", HueShiftRange);
+		_shaderMat.SetShaderParameter("val_shift_range", ValShiftRange);
+		_shaderMat.SetShaderParameter("sat_shift_range", SatShiftRange);
+		_shaderMat.SetShaderParameter("idle_pulse_strength", IdlePulseStrength);
+		_shaderMat.SetShaderParameter("move_pulse_boost", MovePulseBoost);
+
+		// Writhing
 		_shaderMat.SetShaderParameter("writhe_speed", WritheSpeed);
 		_shaderMat.SetShaderParameter("writhe_strength", WritheStrength);
 		_shaderMat.SetShaderParameter("writhe_scale", WritheScale);
+
+		// Mottling
 		_shaderMat.SetShaderParameter("mottle_strength", MottleStrength);
 		_shaderMat.SetShaderParameter("mottle_scale", MottleScale);
-		_shaderMat.SetShaderParameter("pulse_speed", ShaderPulseSpeed);
-		_shaderMat.SetShaderParameter("pulse_strength", ShaderPulseStrength);
-		_shaderMat.SetShaderParameter("pulse_wavelength", ShaderPulseWavelength);
+
+		// Edge wobble
 		_shaderMat.SetShaderParameter("edge_wobble_speed", EdgeWobbleSpeed);
 		_shaderMat.SetShaderParameter("edge_wobble_strength", EdgeWobbleStrength);
 		_shaderMat.SetShaderParameter("edge_wobble_scale", EdgeWobbleScale);
+
+		// Veins
 		_shaderMat.SetShaderParameter("vein_strength", VeinStrength);
 		_shaderMat.SetShaderParameter("vein_scale", VeinScale);
 		_shaderMat.SetShaderParameter("vein_speed", VeinSpeed);
+
+		// Movement
+		_shaderMat.SetShaderParameter("move_speed", _smoothedSpeed);
+		_shaderMat.SetShaderParameter("move_direction", _smoothedDir);
+		_shaderMat.SetShaderParameter("activity_floor", IdleActivityFloor);
+		_shaderMat.SetShaderParameter("move_reactivity", MovementReactivity);
 	}
 
 	public override void _Process(double delta)
 	{
 		if (_tendril == null || _camera == null) return;
 
-		_pulseTimer += (float)delta * PulseSpeed;
+		float dt = (float)delta;
+
+		// Smooth movement data
+		float rawSpeed = _tendril.CurrentSpeed;
+		_smoothedSpeed = Mathf.Lerp(_smoothedSpeed, rawSpeed, SpeedSmoothing * dt);
+
+		Vector2 rawDir = _tendril.LastMoveDirection;
+		if (rawDir.LengthSquared() > 0.01f)
+		{
+			float fromAngle = Mathf.Atan2(_smoothedDir.Y, _smoothedDir.X);
+			float toAngle = Mathf.Atan2(rawDir.Y, rawDir.X);
+			float smoothed = Mathf.LerpAngle(fromAngle, toAngle, SpeedSmoothing * 0.5f * dt);
+			_smoothedDir = new Vector2(Mathf.Cos(smoothed), Mathf.Sin(smoothed));
+		}
+
+		_pulseTimer += dt * PulseSpeed;
 
 		float currentZoom = _camera.Zoom.X;
 		if (!Mathf.IsEqualApprox(currentZoom, _lastZoom, 0.001f))
@@ -164,8 +234,6 @@ public partial class TendrilRenderer : Sprite2D
 		}
 
 		PaintFrame();
-
-		// Sync every frame so inspector tweaks are live
 		SyncShaderUniforms();
 	}
 
@@ -266,14 +334,12 @@ public partial class TendrilRenderer : Sprite2D
 		GlobalPosition = new Vector2(originSubX * cellSize, originSubY * cellSize);
 	}
 
-	/// <summary>
-	/// Deterministic per-pixel hash. Returns a value in [0, 1) that is unique
-	/// per sub-grid coordinate but stable across frames, so the texture doesn't
-	/// shimmer on its own — only the shader's UV distortion reveals the variation.
-	/// </summary>
+	// =========================================================================
+	//  PER-PIXEL COLOR
+	// =========================================================================
+
 	private static float CellHash(int sx, int sy)
 	{
-		// Large primes for spatial hashing — avoids visible grid patterns
 		unchecked
 		{
 			int h = sx * 73856093 ^ sy * 19349663;
@@ -284,14 +350,11 @@ public partial class TendrilRenderer : Sprite2D
 
 	private Color GetCellColor(SubCell cell, float pulse, int sx, int sy)
 	{
-		// Per-pixel variation so adjacent texels differ and shader UV-distortion
-		// actually has visible texture to work with.
 		float hash = CellHash(sx, sy);
-		float variation = (hash - 0.5f) * 2f * PixelVariation; // ±PixelVariation
+		float variation = (hash - 0.5f) * 2f * PixelVariation;
 
-		// Secondary hash for slight hue shifts (prevents uniform grey scatter)
 		float hash2 = CellHash(sx + 7919, sy + 6271);
-		float hueShift = (hash2 - 0.5f) * PixelVariation * 0.5f;
+		float hueShift = (hash2 - 0.5f) * PixelVariation * 0.6f;
 
 		switch (cell.State)
 		{
@@ -301,7 +364,7 @@ public partial class TendrilRenderer : Sprite2D
 				Color c = CoreColor.Lerp(CorePulseColor, t);
 				return new Color(
 					Mathf.Clamp(c.R + variation + hueShift, 0f, 1f),
-					Mathf.Clamp(c.G + variation * 0.6f, 0f, 1f),
+					Mathf.Clamp(c.G + variation * 0.5f, 0f, 1f),
 					Mathf.Clamp(c.B + variation - hueShift, 0f, 1f),
 					c.A
 				);
@@ -324,8 +387,8 @@ public partial class TendrilRenderer : Sprite2D
 				float v = cell.Intensity / 255f * 0.15f;
 				return new Color(
 					Mathf.Clamp(TrailColor.R + v * 0.05f + variation + hueShift, 0f, 1f),
-					Mathf.Clamp(TrailColor.G + v * 0.03f + variation * 0.5f, 0f, 1f),
-					Mathf.Clamp(TrailColor.B + variation * 0.4f - hueShift, 0f, 1f),
+					Mathf.Clamp(TrailColor.G + v * 0.03f + variation * 0.4f, 0f, 1f),
+					Mathf.Clamp(TrailColor.B + variation * 0.5f - hueShift, 0f, 1f),
 					TrailColor.A
 				);
 			}
@@ -333,8 +396,8 @@ public partial class TendrilRenderer : Sprite2D
 			case SubCellState.Root:
 				return new Color(
 					Mathf.Clamp(RootColor.R + variation + hueShift, 0f, 1f),
-					Mathf.Clamp(RootColor.G + variation * 0.5f, 0f, 1f),
-					Mathf.Clamp(RootColor.B + variation - hueShift, 0f, 1f),
+					Mathf.Clamp(RootColor.G + variation * 0.4f, 0f, 1f),
+					Mathf.Clamp(RootColor.B + variation * 0.6f - hueShift, 0f, 1f),
 					RootColor.A
 				);
 
