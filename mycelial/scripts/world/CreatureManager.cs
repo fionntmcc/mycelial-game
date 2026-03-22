@@ -202,29 +202,6 @@ public partial class CreatureManager : Node2D
 		if (creature.IsActive)
 			PlaceCreatureTile(creature);
 	}
-	
-	public (int X, int Y)? GetNearestCreaturePosition(int tileX, int tileY, int radius)
-	{
-		int bestDistSq = radius * radius;
-		(int X, int Y)? best = null;
-
-		foreach (var creature in _creatures)
-		{
-			if (!creature.IsAlive || !creature.IsActive) continue;
-
-			int dx = creature.X - tileX;
-			int dy = creature.Y - tileY;
-			int distSq = dx * dx + dy * dy;
-
-			if (distSq < bestDistSq)
-			{
-				bestDistSq = distSq;
-				best = (creature.X, creature.Y);
-			}
-		}
-
-		return best;
-	}
 
 	private void DespawnDistantCreatures()
 	{
@@ -556,6 +533,89 @@ public partial class CreatureManager : Node2D
 	{
 		creature.IsAlive = false;
 		RestoreCreatureTile(creature);
+	}
+
+	// =========================================================================
+	//  HARPOON SUPPORT (new methods for TendrilHarpoon)
+	// =========================================================================
+
+	/// <summary>
+	/// Find a living, active creature at the given tile position.
+	/// Returns null if no creature is there.
+	/// </summary>
+	public Creature GetCreatureAt(int worldX, int worldY)
+	{
+		foreach (var creature in _creatures)
+		{
+			if (creature.IsAlive && creature.IsActive
+				&& creature.X == worldX && creature.Y == worldY)
+			{
+				return creature;
+			}
+		}
+		return null;
+	}
+
+	/// <summary>
+	/// Kill a creature from an external source (e.g. harpoon delivery).
+	/// </summary>
+	public void KillCreatureExternal(Creature creature)
+	{
+		if (creature == null || !creature.IsAlive) return;
+		KillCreature(creature);
+	}
+
+	/// <summary>
+	/// Forcibly move a creature to a new position (used by harpoon retraction).
+	/// Handles tile save/restore so the creature doesn't leave ghost tiles.
+	/// </summary>
+	public void ForceCreaturePosition(Creature creature, int newX, int newY)
+	{
+		if (creature == null || !creature.IsAlive) return;
+
+		// Restore tile at old position
+		RestoreCreatureTile(creature);
+
+		// Move
+		creature.X = newX;
+		creature.Y = newY;
+		creature.TileAtPosition = (int)_chunkManager.GetTileAt(newX, newY);
+
+		// Place creature tile at new position
+		if (creature.IsActive)
+			PlaceCreatureTile(creature);
+	}
+
+	// =========================================================================
+	//  CREATURE AUTO-STEER SUPPORT (for TendrilController prey attraction)
+	// =========================================================================
+
+	/// <summary>
+	/// Find the nearest living, active creature within a radius of a position.
+	/// Returns the creature's tile position, or null if none found.
+	/// Used by TendrilController for auto-steering toward prey.
+	/// </summary>
+	public (int X, int Y)? GetNearestCreaturePosition(int centerX, int centerY, int radius)
+	{
+		int bestDistSq = radius * radius;
+		(int X, int Y)? best = null;
+
+		foreach (var creature in _creatures)
+		{
+			if (!creature.IsAlive || !creature.IsActive) continue;
+
+			int dx = creature.X - centerX;
+			int dy = creature.Y - centerY;
+			int distSq = dx * dx + dy * dy;
+
+			if (distSq < bestDistSq)
+			{
+				bestDistSq = distSq;
+				best = (creature.X, creature.Y);
+			}
+		}
+
+		return best;
 	}
 
 	// =========================================================================

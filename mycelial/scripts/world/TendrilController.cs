@@ -102,7 +102,7 @@ public partial class TendrilController : Node2D
 	/// <summary>How strongly the tendril steers toward nearby creatures (0–1).</summary>
 	[Export] public float CreatureSteerStrength = 0.15f;
 	
-	/// <summary>Current movement direction for external systems (fog cone, etc).</summary>
+	/// <summary>Current movement direction for external systems (fog cone, harpoon, etc).</summary>
 	public Vector2 LastMoveDirection => _lastMoveDir;
 
 	// =========================================================================

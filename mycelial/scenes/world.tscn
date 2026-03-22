@@ -11,6 +11,7 @@
 [ext_resource type="Script" uid="uid://c85h8iums8xao" path="res://scripts/world/FogOfWar.cs" id="9_fog01"]
 [ext_resource type="Script" uid="uid://b274d7dh216dp" path="res://scripts/debug/TendrilDebugOverlay.cs" id="10_w7kh3"]
 [ext_resource type="Script" uid="uid://bb37pjfigfgk3" path="res://scripts/world/TendrilRenderer.cs" id="11_e3hyu"]
+[ext_resource type="Script" uid="uid://eti3psjumq4a" path="res://scripts/world/TendrilHarpoon.cs" id="12_q5onr"]
 
 [node name="World" type="Node2D" unique_id=185312821]
 
@@ -91,3 +92,9 @@ AbsorptionOrganic = 0.002
 AbsorptionHard = 0.01
 AbsorptionSolid = 0.02
 AbsorptionLiquid = 0.002
+
+[node name="TendrilHarpoon" type="Node" parent="." unique_id=1831169327]
+script = ExtResource("12_q5onr")
+TendrilControllerPath = NodePath("../TendrilController")
+ChunkManagerPath = NodePath("../ChunkManager")
+CreatureManagerPath = NodePath("../CreatureManager")
