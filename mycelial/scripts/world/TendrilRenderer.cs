@@ -11,31 +11,6 @@ using Godot;
 ///   2. Attach this script to it
 ///   3. Set TendrilControllerPath and CameraPath in the inspector
 ///   4. Place the shader file at res://shaders/tendril_organic.gdshader
-///
-/// TUNING GUIDE (inspector params):
-///
-///   --- To make the pulse MORE / LESS visible ---
-///   ValShiftRange:       brightness swing. 0.4 = dramatic, 0.1 = subtle.
-///                        THIS IS THE SINGLE MOST VISIBLE KNOB.
-///   HueShiftRange:       hue rotation. 0.15 = purple↔pink↔blue cycling.
-///                        0.05 = barely noticeable, 0.3 = psychedelic.
-///   SatShiftRange:       saturation. 0.15 = nice pop, 0.3 = neon.
-///   IdlePulseStrength:   how much the tendril breathes at rest.
-///                        0.35 = clearly alive, 0.0 = dead when still.
-///   MovePulseBoost:      how much movement amplifies pulse ON TOP of idle.
-///                        0.65 = dramatic ramp-up, 0.3 = gentle.
-///
-///   --- To change the wave shape ---
-///   HueWaveSpeed:        how fast the wave travels. 3.0 = brisk, 1.0 = lazy.
-///   HueWaveLength:       pixels per cycle. 30 = tight ripples, 100 = broad wash.
-///
-///   --- To change writhing/wobble ---
-///   WritheStrength:      UV distortion amount. 5 = subtle, 15 = aggressive.
-///   EdgeWobbleStrength:  edge breathing. 3 = gentle, 8 = very wobbly.
-///
-///   --- Color palette ---
-///   Tweak CoreColor / TrailColor etc to shift the base tones.
-///   The HSV pulse modulates ON TOP of whatever base colors you set.
 /// </summary>
 public partial class TendrilRenderer : Sprite2D
 {
@@ -46,13 +21,29 @@ public partial class TendrilRenderer : Sprite2D
 	[Export] public string ShaderPath = "res://shaders/tendril_organic.gdshader";
 
 	// --- Cell Colors (purple palette) ---
-	[Export] public Color CoreColor      = new Color(0.62f, 0.58f, 0.68f, 0.95f);  // #9E94AE
-	[Export] public Color CorePulseColor = new Color(0.78f, 0.70f, 0.85f, 1.0f);   // #C7B3D9
-	[Export] public Color FreshColor     = new Color(0.49f, 0.46f, 0.53f, 0.90f);  // #7D7688
-	[Export] public Color TrailColor     = new Color(0.41f, 0.35f, 0.46f, 0.85f);  // #695A75
-	[Export] public Color RootColor      = new Color(0.25f, 0.18f, 0.30f, 0.72f);  // #402E4D
-	[Export] public int AuraRadius = 2;
-	[Export] public Color AuraColor      = new Color(0.35f, 0.22f, 0.44f, 0.22f);  // #5A3870
+	[Export] public Color CoreColor      = new Color(0.62f, 0.58f, 0.68f, 0.95f);
+	[Export] public Color CorePulseColor = new Color(0.78f, 0.70f, 0.85f, 1.0f);
+	[Export] public Color FreshColor     = new Color(0.49f, 0.46f, 0.53f, 0.90f);
+	[Export] public Color TrailColor     = new Color(0.41f, 0.35f, 0.46f, 0.85f);
+	[Export] public Color RootColor      = new Color(0.25f, 0.18f, 0.30f, 0.72f);
+
+	// --- Spline Aura ---
+	/// <summary>Path to TendrilSplineRenderer for spline-based aura lighting.</summary>
+	[Export] public NodePath SplineRendererPath { get; set; }
+
+	/// <summary>Extra glow radius beyond the spline width (in sub-cells).</summary>
+	[Export] public int AuraSpread = 3;
+
+	/// <summary>Glow intensity falloff power. Higher = tighter glow around the spline.</summary>
+	[Export(PropertyHint.Range, "0.5,4,0.1")] public float AuraFalloffPower = 1.5f;
+
+	/// <summary>Skip every Nth spline point for aura (1 = every point, 2 = every other, etc).
+	/// Higher = cheaper but less uniform glow.</summary>
+	[Export(PropertyHint.Range, "1,8,1")] public int AuraSplineStride = 2;
+
+	[Export] public Color AuraColor = new Color(0.35f, 0.22f, 0.44f, 0.22f);
+
+	// --- Pulse ---
 	[Export] public float PulseSpeed = 4.5f;
 	[Export] public float PulseIntensity = 0.35f;
 	[Export] public int Padding = 8;
@@ -60,20 +51,13 @@ public partial class TendrilRenderer : Sprite2D
 	// --- Per-Pixel Variation ---
 	[Export(PropertyHint.Range, "0,0.5,0.01")] public float PixelVariation = 0.12f;
 
-	// --- Shader: HSV Pulse Wave (THE BIG KNOBS) ---
-	/// <summary>How fast the color wave ripples along the tendril.</summary>
+	// --- Shader: HSV Pulse Wave ---
 	[Export(PropertyHint.Range, "0,8,0.1")] public float HueWaveSpeed = 3.0f;
-	/// <summary>Pixels per wave cycle. Lower = tighter ripples.</summary>
 	[Export(PropertyHint.Range, "5,200,1")] public float HueWaveLength = 30.0f;
-	/// <summary>How far the hue rotates (±). 0.15 = purple↔pink↔blue.</summary>
 	[Export(PropertyHint.Range, "0,0.5,0.01")] public float HueShiftRange = 0.15f;
-	/// <summary>Brightness oscillation at peak. 0.4 = VERY visible.</summary>
 	[Export(PropertyHint.Range, "0,0.8,0.01")] public float ValShiftRange = 0.40f;
-	/// <summary>Saturation oscillation at peak.</summary>
 	[Export(PropertyHint.Range, "0,0.5,0.01")] public float SatShiftRange = 0.15f;
-	/// <summary>Pulse strength when completely idle (the "breathing").</summary>
 	[Export(PropertyHint.Range, "0,1,0.01")] public float IdlePulseStrength = 0.35f;
-	/// <summary>Additional pulse intensity from movement (stacks on idle).</summary>
 	[Export(PropertyHint.Range, "0,1,0.01")] public float MovePulseBoost = 0.65f;
 
 	// --- Shader: Writhing ---
@@ -102,6 +86,7 @@ public partial class TendrilRenderer : Sprite2D
 
 	private TendrilController _tendril;
 	private Camera2D _camera;
+	private TendrilSplineRenderer _splineRenderer;
 	private float _pulseTimer;
 	private ShaderMaterial _shaderMat;
 
@@ -120,6 +105,8 @@ public partial class TendrilRenderer : Sprite2D
 			_tendril = GetNode<TendrilController>(TendrilControllerPath);
 		if (CameraPath != null)
 			_camera = GetNode<Camera2D>(CameraPath);
+		if (SplineRendererPath != null)
+			_splineRenderer = GetNode<TendrilSplineRenderer>(SplineRendererPath);
 
 		if (_tendril == null || _camera == null)
 		{
@@ -279,21 +266,28 @@ public partial class TendrilRenderer : Sprite2D
 
 		float pulse = (Mathf.Sin(_pulseTimer) + 1f) * 0.5f;
 
-		// --- Pass 1: Aura glow ---
-		if (AuraRadius > 0)
+		// --- Pass 1: Spline-based aura glow ---
+		if (AuraSpread > 0 && _splineRenderer != null)
 		{
-			foreach (var (key, cell) in subGrid.Cells)
+			var splinePoints = _splineRenderer.InterpolatedPoints;
+
+			for (int i = 0; i < splinePoints.Count; i += AuraSplineStride)
 			{
-				if (cell.State != SubCellState.Trail && cell.State != SubCellState.Root)
-					continue;
+				var sp = splinePoints[i];
 
-				var (sx, sy) = SubGridData.UnpackCoords(key);
-				int px = sx - originSubX;
-				int py = sy - originSubY;
+				// Convert world-pixel position to image coordinates
+				float subXf = sp.Position.X / cellSize;
+				float subYf = sp.Position.Y / cellSize;
+				int px = (int)Mathf.Floor(subXf) - originSubX;
+				int py = (int)Mathf.Floor(subYf) - originSubY;
 
-				for (int ay = -AuraRadius; ay <= AuraRadius; ay++)
+				// Glow radius = half the spline width (in sub-cells) + extra spread
+				float widthInSubCells = sp.Width / cellSize;
+				int glowRadius = (int)Mathf.Ceil(widthInSubCells * 0.5f) + AuraSpread;
+
+				for (int ay = -glowRadius; ay <= glowRadius; ay++)
 				{
-					for (int ax = -AuraRadius; ax <= AuraRadius; ax++)
+					for (int ax = -glowRadius; ax <= glowRadius; ax++)
 					{
 						int apx = px + ax;
 						int apy = py + ay;
@@ -301,9 +295,11 @@ public partial class TendrilRenderer : Sprite2D
 							continue;
 
 						float dist = Mathf.Sqrt(ax * ax + ay * ay);
-						if (dist > AuraRadius) continue;
+						if (dist > glowRadius) continue;
 
-						float fade = 1f - (dist / AuraRadius);
+						float normalizedDist = dist / glowRadius;
+						float fade = Mathf.Pow(1f - normalizedDist, AuraFalloffPower);
+
 						Color glow = new Color(AuraColor.R, AuraColor.G, AuraColor.B, AuraColor.A * fade);
 
 						Color existing = _image.GetPixel(apx, apy);

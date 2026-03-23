@@ -56,6 +56,23 @@ public partial class TendrilSplineRenderer : Node2D
 	[ExportGroup("Colors")]
 	[Export] public Color TipColor = new(0.55f, 0.35f, 0.55f, 1f);
 	[Export] public Color BaseColor = new(0.3f, 0.22f, 0.18f, 0.85f);
+	
+	/// <summary>
+	/// A point along the interpolated spline with its width at that position.
+	/// Exposed for TendrilRenderer's aura pass.
+	/// </summary>
+	public struct SplinePoint
+	{
+		public Vector2 Position; // World pixels
+		public float Width;      // Pixel width of the tendril at this point
+	}
+
+	/// <summary>
+	/// Last frame's interpolated spline points with per-point widths.
+	/// Read by TendrilRenderer for the spline-based aura glow.
+	/// Empty if the trail has fewer than 2 control points.
+	/// </summary>
+	public List<SplinePoint> InterpolatedPoints { get; private set; } = new();
 
 	// =========================================================================
 	//  INTERNAL STATE
@@ -151,6 +168,9 @@ public partial class TendrilSplineRenderer : Node2D
 
 		_line.WidthCurve = BuildWidthCurve(splinePoints.Count);
 		_line.Gradient = BuildColorGradient();
+		
+		// Cache interpolated points + widths for the aura system
+		RebuildInterpolatedPoints(splinePoints);
 	}
 
 	/// <summary>Clear all trail data (respawn).</summary>
@@ -158,6 +178,7 @@ public partial class TendrilSplineRenderer : Node2D
 	{
 		_controlPoints.Clear();
 		_line?.ClearPoints();
+		InterpolatedPoints.Clear();
 	}
 
 	/// <summary>Remove oldest N control points (retreat animation).</summary>
@@ -300,5 +321,39 @@ public partial class TendrilSplineRenderer : Node2D
 		gradient.SetColor(1, TipColor);
 		gradient.AddPoint(0.6f, BaseColor.Lerp(TipColor, 0.4f));
 		return gradient;
+	}
+	
+	/// <summary>
+	/// Build the public InterpolatedPoints list from the current spline.
+	/// Each point gets the width from the same taper/pulse logic as BuildWidthCurve.
+	/// </summary>
+	private void RebuildInterpolatedPoints(List<Vector2> splinePoints)
+	{
+		InterpolatedPoints.Clear();
+
+		if (splinePoints.Count < 2) return;
+
+		for (int i = 0; i < splinePoints.Count; i++)
+		{
+			float t = i / (float)(splinePoints.Count - 1);
+
+			// Same taper logic as BuildWidthCurve
+			float taperT = t < TaperStart ? 0f : (t - TaperStart) / (1f - TaperStart);
+			float width = Mathf.Lerp(BaseWidth, TipWidth, taperT);
+
+			// Pulse (matches BuildWidthCurve)
+			if (EnablePulse)
+			{
+				float freq = PulseBaseFrequency + _currentSpeed * PulseSpeedScale;
+				float pulse = Mathf.Sin(t * PulseSpatialFrequency * Mathf.Tau + _time * freq * Mathf.Tau);
+				width *= (1f + pulse * PulseAmplitude);
+			}
+
+			InterpolatedPoints.Add(new SplinePoint
+			{
+				Position = splinePoints[i],
+				Width = width,
+			});
+		}
 	}
 }
