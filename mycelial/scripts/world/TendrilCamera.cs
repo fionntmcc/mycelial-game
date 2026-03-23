@@ -87,6 +87,9 @@ public partial class TendrilCamera : Camera2D
 	private float _collisionMagnitude;       // Current shake magnitude (decays to 0)
 	private float _collisionPhase;           // Oscillation phase
 
+	// Zoom snap — when true, skip lerp and snap to target this frame
+	private bool _snapToTargetNextFrame;
+
 	public override void _Ready()
 	{
 		if (TendrilControllerPath != null)
@@ -111,10 +114,7 @@ public partial class TendrilCamera : Camera2D
 
 		if (_tendril != null)
 		{
-			_targetPosition = new Vector2(
-				WorldConfig.TreeWorldX * WorldConfig.TileSize,
-				0
-			);
+			_targetPosition = _tendril.GetHeadPixelPositionSmooth();
 			GlobalPosition = _targetPosition;
 		}
 	}
@@ -128,7 +128,7 @@ public partial class TendrilCamera : Camera2D
 		// =====================================================================
 		//  BASE TARGET — tendril head pixel position
 		// =====================================================================
-		_targetPosition = _tendril.GetHeadPixelPosition();
+		_targetPosition = _tendril.GetHeadPixelPositionSmooth();
 
 		// =====================================================================
 		//  LOOK-AHEAD — lead the camera in the movement direction
@@ -201,8 +201,17 @@ public partial class TendrilCamera : Camera2D
 		// =====================================================================
 		Vector2 finalTarget = _targetPosition + _lookAheadOffset + moveShakeOffset + collisionShakeOffset;
 
-		// Smooth follow toward the combined target
-		Vector2 next = GlobalPosition.Lerp(finalTarget, FollowSpeed * dt);
+		// On zoom change, snap directly to target so the tendril stays centered
+		Vector2 next;
+		if (_snapToTargetNextFrame)
+		{
+			next = finalTarget;
+			_snapToTargetNextFrame = false;
+		}
+		else
+		{
+			next = GlobalPosition.Lerp(finalTarget, FollowSpeed * dt);
+		}
 
 		if (!PixelPerfectMode)
 		{
@@ -210,12 +219,24 @@ public partial class TendrilCamera : Camera2D
 			return;
 		}
 
-		// Pixel-perfect snapping
+		// Pixel-perfect snapping — snap to nearest screen pixel
 		float snapStep = 1.0f / Mathf.Max(Zoom.X, 0.0001f);
-		GlobalPosition = new Vector2(
-			Mathf.Snapped(next.X, snapStep),
-			Mathf.Snapped(next.Y, snapStep)
-		);
+
+		// Only snap if the camera is close enough to the target that snapping
+		// won't cause visible jumping. This prevents micro-stutter during smooth follow.
+		float distToTarget = next.DistanceTo(finalTarget);
+		if (distToTarget < snapStep * 2f)
+		{
+			GlobalPosition = new Vector2(
+				Mathf.Snapped(next.X, snapStep),
+				Mathf.Snapped(next.Y, snapStep)
+			);
+		}
+		else
+		{
+			// Still catching up — don't snap yet, let lerp be smooth
+			GlobalPosition = next;
+		}
 	}
 
 	public override void _UnhandledInput(InputEvent @event)
@@ -225,13 +246,21 @@ public partial class TendrilCamera : Camera2D
 		{
 			if (PixelPerfectMode)
 			{
+				int prevIndex = _zoomLevelIndex;
+
 				if (mouseEvent.ButtonIndex == MouseButton.WheelUp)
 					_zoomLevelIndex = System.Math.Min(_zoomLevelIndex + 1, PixelPerfectZoomLevels.Length - 1);
 				else if (mouseEvent.ButtonIndex == MouseButton.WheelDown)
 					_zoomLevelIndex = System.Math.Max(_zoomLevelIndex - 1, 0);
 
-				float newZoomLevel = PixelPerfectZoomLevels[_zoomLevelIndex];
-				Zoom = new Vector2(newZoomLevel, newZoomLevel);
+				if (_zoomLevelIndex != prevIndex)
+				{
+					float newZoomLevel = PixelPerfectZoomLevels[_zoomLevelIndex];
+					Zoom = new Vector2(newZoomLevel, newZoomLevel);
+
+					// Snap camera to tendril on zoom change so it stays centered
+					_snapToTargetNextFrame = true;
+				}
 				return;
 			}
 
@@ -242,8 +271,12 @@ public partial class TendrilCamera : Camera2D
 			else if (mouseEvent.ButtonIndex == MouseButton.WheelDown)
 				newZoom -= ZoomSpeed;
 
-			newZoom = Mathf.Clamp(newZoom, MinZoom, MaxZoom);
-			Zoom = new Vector2(newZoom, newZoom);
+			float clampedZoom = Mathf.Clamp(newZoom, MinZoom, MaxZoom);
+			if (!Mathf.IsEqualApprox(clampedZoom, Zoom.X))
+			{
+				Zoom = new Vector2(clampedZoom, clampedZoom);
+				_snapToTargetNextFrame = true;
+			}
 		}
 	}
 

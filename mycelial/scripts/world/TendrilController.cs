@@ -159,6 +159,20 @@ public partial class TendrilController : Node2D
 
 	/// <summary>Sub-grid Y coordinate of the head center.</summary>
 	public int SubHeadY => _subHeadY;
+	
+	/// <summary>
+	/// Smoothly interpolated head position in world pixels.
+	/// Includes fractional sub-cell offset from the move accumulator
+	/// so the camera can track between discrete 4px steps.
+	/// </summary>
+	public Vector2 GetHeadPixelPositionSmooth()
+	{
+		int cellSize = WorldConfig.SubCellSize;
+		return new Vector2(
+			(_subHeadX + _moveAccumulator.X) * cellSize + cellSize / 2f,
+			(_subHeadY + _moveAccumulator.Y) * cellSize + cellSize / 2f
+		);
+	}
 
 	public float Hunger { get; private set; }
 	public bool IsRetreating { get; private set; }

@@ -8,42 +8,29 @@ using Mycorrhiza.Data;
 ///
 /// Uses the same resolution, coordinate system, and rendering approach as
 /// TendrilRenderer — creatures and the tendril share the same visual language.
-/// This node should be a Sprite2D sibling of TendrilRenderer with a higher
-/// Z-index so creatures draw on top of the tendril trail.
 ///
 /// SETUP:
 ///   1. Add a Sprite2D node as sibling of TendrilRenderer
 ///   2. Attach this script
-///   3. Assign CreatureManagerPath, CameraPath
-///   4. Texture Filter to "Nearest" in the inspector (pixel art)
+///   3. Assign CreatureManagerPath, CameraPath, TendrilControllerPath
+///   4. Texture Filter to "Nearest" in the inspector
 ///   5. Centered = false
-///
-/// PERFORMANCE:
-///   With 60 creatures × ~20 cells each = ~1200 pixel writes per frame.
-///   Trivial compared to the tendril's trail which can be thousands of cells.
 /// </summary>
 public partial class CreatureRenderer : Sprite2D
 {
 	[Export] public NodePath CreatureManagerPath { get; set; }
 	[Export] public NodePath CameraPath { get; set; }
+	[Export] public NodePath TendrilControllerPath { get; set; }
 
 	// --- Visual Config ---
-
-	/// <summary>
-	/// Padding in sub-cells beyond the viewport edge.
-	/// Prevents creatures from popping in at screen edges.
-	/// </summary>
 	[Export] public int Padding = 8;
-
-	/// <summary>Flash color when a creature takes damage.</summary>
 	[Export] public Color DamageFlashColor = new(1f, 0.3f, 0.2f, 1f);
-
-	/// <summary>Duration of the damage flash in seconds.</summary>
 	[Export] public float DamageFlashDuration = 0.12f;
 
 	// --- State ---
 	private CreatureManager _creatureManager;
 	private Camera2D _camera;
+	private TendrilController _tendril;
 	private Image _image;
 	private ImageTexture _texture;
 	private int _imgWidth;
@@ -57,6 +44,8 @@ public partial class CreatureRenderer : Sprite2D
 			_creatureManager = GetNode<CreatureManager>(CreatureManagerPath);
 		if (CameraPath != null)
 			_camera = GetNode<Camera2D>(CameraPath);
+		if (TendrilControllerPath != null)
+			_tendril = GetNode<TendrilController>(TendrilControllerPath);
 
 		if (_creatureManager == null || _camera == null)
 		{
@@ -65,7 +54,6 @@ public partial class CreatureRenderer : Sprite2D
 			return;
 		}
 
-		// Match TendrilRenderer's setup exactly
 		TextureFilter = TextureFilterEnum.Nearest;
 		Centered = false;
 
@@ -73,7 +61,7 @@ public partial class CreatureRenderer : Sprite2D
 		Scale = new Vector2(cellSize, cellSize);
 
 		ZAsRelative = false;
-		ZIndex = 101; // Just above TendrilRenderer's 100
+		ZIndex = 101;
 
 		_lastZoom = _camera.Zoom.X;
 		RebuildImage();
@@ -85,7 +73,6 @@ public partial class CreatureRenderer : Sprite2D
 
 		_animTime += (float)delta;
 
-		// Rebuild image if zoom changed (same as TendrilRenderer)
 		float currentZoom = _camera.Zoom.X;
 		if (!Mathf.IsEqualApprox(currentZoom, _lastZoom, 0.001f))
 		{
@@ -148,7 +135,6 @@ public partial class CreatureRenderer : Sprite2D
 			var creature = creatures[c];
 			if (!creature.IsAlive || !creature.IsActive) continue;
 
-			// Broad cull: skip if creature is nowhere near the viewport
 			int creaturePx = creature.SubX - originSubX;
 			int creaturePy = creature.SubY - originSubY;
 			int bodyRadius = creature.Body?.Radius ?? 4;
@@ -160,24 +146,18 @@ public partial class CreatureRenderer : Sprite2D
 		}
 
 		_texture.Update(_image);
-
-		// Position the sprite so sub-cell coords map to world pixels
-		// This is the same math TendrilRenderer uses
 		GlobalPosition = new Vector2(originSubX * cellSize, originSubY * cellSize);
 	}
 
 	private void PaintCreature(Creature creature, int originSubX, int originSubY)
 	{
-		// Get the current animation frame
 		var bodySet = CreatureBodyRegistry.GetBodySet(creature.Species);
 		bool isMoving = creature.Velocity.LengthSquared() > 0.5f;
 		var body = isMoving ? bodySet.GetFrame(_animTime + creature.AnimTimeOffset)
 							: bodySet.Idle;
 
-		// Flip horizontally if moving left
 		bool flipX = creature.Velocity.X < -0.5f;
 
-		// Damage flash: override colors briefly when hit
 		bool flashing = creature.DamageFlashTimer > 0;
 		float flashLerp = flashing
 			? Mathf.Clamp(creature.DamageFlashTimer / DamageFlashDuration, 0f, 1f)
@@ -196,7 +176,6 @@ public partial class CreatureRenderer : Sprite2D
 
 			Color color = body.Colors[i];
 
-			// Damage flash: lerp toward flash color
 			if (flashing)
 				color = color.Lerp(DamageFlashColor, flashLerp * 0.7f);
 

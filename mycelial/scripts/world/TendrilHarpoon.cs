@@ -78,6 +78,9 @@ public partial class TendrilHarpoon : Node
 
 	/// <summary>Knockback speed applied to the stationary creature on slam.</summary>
 	[Export] public float SlamKnockbackForce = 60f;
+	
+	/// <summary>Path to CreatureParticles node for slam/delivery effects.</summary>
+	[Export] public NodePath ParticlesPath { get; set; }
 
 	// --- State Machine ---
 	private enum HarpoonState
@@ -117,6 +120,9 @@ public partial class TendrilHarpoon : Node
 	// Input state
 	private bool _wasSpaceHeld;
 	private bool _wasTriggerHeld;
+	
+	// Creature Particles
+	private CreatureParticles _particles;
 
 	// --- Signals ---
 	[Signal] public delegate void ChargeStartedEventHandler();
@@ -141,6 +147,8 @@ public partial class TendrilHarpoon : Node
 			_chunkManager = GetNode<ChunkManager>(ChunkManagerPath);
 		if (CreatureManagerPath != null)
 			_creatureManager = GetNode<CreatureManager>(CreatureManagerPath);
+		if (ParticlesPath != null)
+			_particles = GetNode<CreatureParticles>(ParticlesPath);
 
 		if (_tendril == null || _chunkManager == null)
 			GD.PrintErr("TendrilHarpoon: Missing TendrilController or ChunkManager!");
@@ -544,7 +552,8 @@ public partial class TendrilHarpoon : Node
 			{
 				GD.Print($"SLAM! {_grabbedCreature.Species} hit {other.Species}!");
 			}
-
+				
+			_particles?.SpawnDamageHit(other, projectileSubX, projectileSubY);
 			EmitSignal(SignalName.CreatureSlammed, other.SubX, other.SubY);
 
 			// If the projectile died from the impact, drop it
@@ -567,6 +576,7 @@ public partial class TendrilHarpoon : Node
 		{
 			var config = CreatureRegistry.GetConfig(_grabbedCreature.Species);
 			_tendril.AddHunger(config.HungerOnConsume);
+			_particles?.SpawnBurst(_grabbedCreature, _tendril.SubHeadX, _tendril.SubHeadY);
 			_creatureManager?.KillCreatureExternal(_grabbedCreature);
 			GD.Print($"Harpoon delivered {_grabbedCreature.Species}! +{config.HungerOnConsume} hunger");
 		}
