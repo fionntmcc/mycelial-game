@@ -115,6 +115,8 @@ GuidedTurnRate = 7.0
 HarpoonThickness = 1
 ShapeIrregularity = 1.0
 GrabPulseDuration = 1.0
+ThrowUnlocked = true
+RushSearchDistanceBlocks = 50
 
 [node name="CreatureRenderer" type="Sprite2D" parent="." unique_id=369762693]
 script = ExtResource("13_jhx03")

@@ -39,6 +39,8 @@ public class Creature
 	public CreatureBody Body;
 	public float AnimTimeOffset;       // Per-creature offset so they don't all animate in sync
 	public float DamageFlashTimer;     // Counts down from DamageFlashDuration on hit
+	public float StunTimer;            // Countdown for rush/impact stun
+	public bool IsStunned;
 }
 
 /// <summary>
@@ -71,6 +73,7 @@ public partial class CreatureManager : Node2D
 
 	/// <summary>How long the damage flash lasts (seconds).</summary>
 	[Export] public float DamageFlashDuration = 0.12f;
+	[Export] public float DefaultStunDuration = 1.0f;
 	
 	/// <summary>Path to CreatureParticles node for death/hit effects.</summary>
 	[Export] public NodePath ParticlesPath { get; set; }
@@ -130,7 +133,18 @@ public partial class CreatureManager : Node2D
 			if (creature.DamageFlashTimer > 0)
 				creature.DamageFlashTimer -= dt;
 
-			UpdateCreatureAI(creature, dt);
+			if (creature.StunTimer > 0f)
+			{
+				creature.StunTimer -= dt;
+				if (creature.StunTimer <= 0f)
+				{
+					creature.StunTimer = 0f;
+					creature.IsStunned = false;
+				}
+			}
+
+			if (!creature.IsStunned)
+				UpdateCreatureAI(creature, dt);
 			CheckTendrilCollision(creature);
 		}
 	}
@@ -262,6 +276,24 @@ public partial class CreatureManager : Node2D
 	}
 
 	/// <summary>
+	/// Apply hard stun to a creature. While stunned, AI updates are skipped.
+	/// </summary>
+	public void StunCreature(Creature creature, float duration)
+	{
+		if (creature == null || !creature.IsAlive) return;
+
+		float clamped = Mathf.Max(0f, duration);
+		if (clamped <= 0f)
+			clamped = DefaultStunDuration;
+
+		creature.IsStunned = true;
+		creature.StunTimer = Mathf.Max(creature.StunTimer, clamped);
+		creature.Velocity = Vector2.Zero;
+		creature.MoveAccumulator = Vector2.Zero;
+		creature.MoveTimer = 0f;
+	}
+
+	/// <summary>
 	/// Deal damage to a creature. Returns true if the creature died.
 	/// Triggers damage flash.
 	/// </summary>
@@ -275,6 +307,8 @@ public partial class CreatureManager : Node2D
 		if (creature.Health <= 0)
 		{
 			_particles?.SpawnBurst(creature, creature.SubX, creature.SubY);
+			creature.IsStunned = false;
+			creature.StunTimer = 0f;
 			creature.IsAlive = false;
 			return true;
 		}
@@ -373,6 +407,8 @@ public partial class CreatureManager : Node2D
 			Body = CreatureBodyRegistry.GetDefaultBody(config.Species),
 			AnimTimeOffset = _rng.NextSingle() * 10f, // Desync animations
 			DamageFlashTimer = 0f,
+			StunTimer = 0f,
+			IsStunned = false,
 		};
 
 		_creatures.Add(creature);

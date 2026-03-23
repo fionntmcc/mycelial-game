@@ -65,6 +65,11 @@ public partial class TendrilHarpoon : Node
 	[Export] public float StickDeadZone = 0.22f;
 	[Export] public float GrabPulseDuration = 0.14f;
 
+	// --- Throw Ability ---
+	[ExportGroup("Throw Ability")]
+	[Export] public bool ThrowUnlocked = false;
+	[Export] public bool ThrowEnabled = true;
+
 	// --- Slam / Throw Config ---
 
 	/// <summary>Speed of a thrown creature in sub-cells per second.</summary>
@@ -90,6 +95,15 @@ public partial class TendrilHarpoon : Node
 	[Export] public int RetractSlamDamageToProjectile = 1;
 	[Export] public float RetractSlamKnockbackForce = 60f;
 
+	// --- Rush Chain Config ---
+	[Export] public bool EnableRushChain = true;
+	[Export] public float RushStunDuration = 1.0f;
+	[Export] public int RushSearchDistanceBlocks = 20;
+	[Export] public float RushSpeed = 260f;
+	[Export] public int RushConsumeRadius = 5;
+	[Export] public int RushDamageToNonStunned = 2;
+	[Export] public float RushKnockback = 75f;
+
 	// --- State Machine ---
 	private enum HarpoonState
 	{
@@ -99,6 +113,7 @@ public partial class TendrilHarpoon : Node
 		Straight,     // Extending in a straight line
 		Armed,        // Creature grabbed, fire held — waiting for aim + release
 		Throwing,     // Creature launched as projectile
+		Rushing,      // Chain-rush toward anchor wall after throw slam
 		Retracting,
 	}
 
@@ -138,6 +153,14 @@ public partial class TendrilHarpoon : Node
 	private Vector2 _throwDirection;
 	private float _projDistanceTraveled;
 	private float _projStepAccumulator;
+
+	// Rush chain state
+	private float _rushX, _rushY;
+	private int _rushSubX, _rushSubY;
+	private int _rushAnchorSubX, _rushAnchorSubY;
+	private Vector2 _rushDirection;
+	private float _rushStepAccumulator;
+	private readonly HashSet<Creature> _rushProcessed = new();
 
 	// Input state
 	private bool _wasSpaceHeld;
@@ -183,6 +206,9 @@ public partial class TendrilHarpoon : Node
 	/// <summary>0–1 charge indicator for HUD.</summary>
 	public float ChargePercent => _state == HarpoonState.Winding
 		? Mathf.Clamp(_windTimer / GuidedModeThreshold, 0f, 1f) : 0f;
+
+	/// <summary>True when throw branch is available to the player.</summary>
+	public bool IsThrowAvailable => ThrowUnlocked && ThrowEnabled;
 
 	public override void _Ready()
 	{
@@ -233,6 +259,9 @@ public partial class TendrilHarpoon : Node
 				break;
 			case HarpoonState.Throwing:
 				ProcessThrowing(dt);
+				break;
+			case HarpoonState.Rushing:
+				ProcessRushing(dt);
 				break;
 			case HarpoonState.Retracting:
 				ProcessRetracting(dt);
@@ -400,6 +429,16 @@ public partial class TendrilHarpoon : Node
 			_grabbedCreature = hitCreature;
 			TriggerGrabPulse(hitCreature, newSubX, newSubY);
 			EmitSignal(SignalName.CreatureGrabbed, hitCreature.SubX, hitCreature.SubY);
+
+			if (IsThrowAvailable)
+				RushTendrilToCaughtCreature(newSubX, newSubY);
+
+			if (!IsThrowAvailable)
+			{
+				GD.Print($"Harpoon grabbed {hitCreature.Species} — throw disabled, auto-consume.");
+				StartRetract();
+				return false;
+			}
 
 			// KEY DECISION: is fire still held?
 			if (IsFireInputHeld())
@@ -604,6 +643,26 @@ public partial class TendrilHarpoon : Node
 
 			if (dx * dx + dy * dy > minDist * minDist) continue;
 
+			Creature projectileCreature = _grabbedCreature;
+
+			// Rush chain gets first priority on throw-hit.
+			if (EnableRushChain
+				&& projectileCreature != null
+				&& projectileCreature.IsAlive
+				&& other.IsAlive)
+			{
+				_creatureManager.StunCreature(other, RushStunDuration);
+				_creatureManager.StunCreature(projectileCreature, RushStunDuration);
+
+				if (TryStartRushFromCollision(_projSubX, _projSubY, _throwDirection))
+				{
+					GD.Print($"RUSH CHAIN! Anchor at ({_rushAnchorSubX},{_rushAnchorSubY})");
+					return true;
+				}
+
+				GD.Print("Rush chain: no valid anchor found within search range.");
+			}
+
 			// SLAM HIT
 			bool targetDied = _creatureManager.DamageCreature(other, SlamDamage);
 			bool projDied = _creatureManager.DamageCreature(_grabbedCreature, SlamSelfDamage);
@@ -635,7 +694,7 @@ public partial class TendrilHarpoon : Node
 
 			EmitSignal(SignalName.CreatureSlammed, other.SubX, other.SubY);
 
-			// Handle projectile creature
+			// Handle projectile creature when no rush chain starts
 			if (projDied)
 			{
 				var projConfig = CreatureRegistry.GetConfig(_grabbedCreature.Species);
@@ -698,6 +757,248 @@ public partial class TendrilHarpoon : Node
 		}
 
 		FinishThrow();
+	}
+
+	private bool TryStartRushFromCollision(int collisionSubX, int collisionSubY, Vector2 rushDirection)
+	{
+		if (_creatureManager == null || _tendril == null) return false;
+		if (rushDirection.LengthSquared() < 0.0001f) return false;
+
+		if (!TryFindRushAnchor(collisionSubX, collisionSubY, rushDirection.Normalized(), out int anchorSubX, out int anchorSubY))
+			return false;
+
+		_rushX = collisionSubX;
+		_rushY = collisionSubY;
+		_rushSubX = collisionSubX;
+		_rushSubY = collisionSubY;
+		_rushAnchorSubX = anchorSubX;
+		_rushAnchorSubY = anchorSubY;
+		_rushDirection = (new Vector2(anchorSubX - collisionSubX, anchorSubY - collisionSubY)).Normalized();
+		_rushStepAccumulator = 0f;
+		_rushProcessed.Clear();
+
+		ApplyRushInteractionsAt(_rushSubX, _rushSubY);
+
+		_grabbedCreature = null;
+		_state = HarpoonState.Rushing;
+		return true;
+	}
+
+	private bool TryFindRushAnchor(int startSubX, int startSubY, Vector2 direction, out int anchorSubX, out int anchorSubY)
+	{
+		anchorSubX = 0;
+		anchorSubY = 0;
+
+		int maxSubSteps = Math.Max(1, RushSearchDistanceBlocks * WorldConfig.SubGridScale);
+		float scanX = startSubX + 0.5f;
+		float scanY = startSubY + 0.5f;
+
+		int lastTileX = int.MinValue;
+		int lastTileY = int.MinValue;
+
+		for (int i = 0; i < maxSubSteps; i++)
+		{
+			scanX += direction.X;
+			scanY += direction.Y;
+
+			int subX = Mathf.FloorToInt(scanX);
+			int subY = Mathf.FloorToInt(scanY);
+			var (tileX, tileY) = SubGridData.SubToTerrain(subX, subY);
+
+			if (tileX == lastTileX && tileY == lastTileY)
+				continue;
+
+			lastTileX = tileX;
+			lastTileY = tileY;
+
+			TileType tile = _chunkManager.GetTileAt(tileX, tileY);
+			if (!IsTraversibleRushDestinationTile(tile))
+				continue;
+
+			anchorSubX = tileX * WorldConfig.SubGridScale + WorldConfig.SubGridScale / 2;
+			anchorSubY = tileY * WorldConfig.SubGridScale + WorldConfig.SubGridScale / 2;
+			return true;
+		}
+
+		return false;
+	}
+
+	private static bool IsTraversibleRushDestinationTile(TileType tile)
+	{
+		if (tile == TileType.Air)
+			return false;
+
+		if (TileProperties.Is(tile, TileFlags.Liquid) || TileProperties.Is(tile, TileFlags.Hazardous))
+			return false;
+
+		// Mirror the tendril's blocked-solid rule (excluding special tree exceptions).
+		if (TileProperties.Is(tile, TileFlags.Solid) && !TileProperties.Is(tile, TileFlags.Breakable))
+			return false;
+
+		return true;
+	}
+
+	private void RushTendrilToCaughtCreature(int caughtSubX, int caughtSubY)
+	{
+		if (_tendril == null || _chunkManager == null) return;
+
+		if (!TryFindNearestTraversibleSubAlongLine(
+			_tendril.SubHeadX,
+			_tendril.SubHeadY,
+			caughtSubX,
+			caughtSubY,
+			out int targetSubX,
+			out int targetSubY))
+		{
+			return;
+		}
+
+		_tendril.RushMoveToSub(targetSubX, targetSubY);
+	}
+
+	private bool TryFindNearestTraversibleSubAlongLine(
+		int fromSubX,
+		int fromSubY,
+		int toSubX,
+		int toSubY,
+		out int resultSubX,
+		out int resultSubY)
+	{
+		resultSubX = fromSubX;
+		resultSubY = fromSubY;
+
+		Vector2 dir = new Vector2(toSubX - fromSubX, toSubY - fromSubY);
+		if (dir.LengthSquared() < 0.001f)
+			return false;
+
+		dir = dir.Normalized();
+		float x = fromSubX + 0.5f;
+		float y = fromSubY + 0.5f;
+
+		int maxSteps = Math.Max(Math.Abs(toSubX - fromSubX), Math.Abs(toSubY - fromSubY));
+		maxSteps = Math.Max(1, maxSteps);
+
+		int bestX = fromSubX;
+		int bestY = fromSubY;
+		bool found = false;
+
+		for (int i = 0; i < maxSteps; i++)
+		{
+			x += dir.X;
+			y += dir.Y;
+
+			int subX = Mathf.FloorToInt(x);
+			int subY = Mathf.FloorToInt(y);
+			var (tileX, tileY) = SubGridData.SubToTerrain(subX, subY);
+			TileType tile = _chunkManager.GetTileAt(tileX, tileY);
+
+			if (IsTraversibleRushDestinationTile(tile))
+			{
+				bestX = subX;
+				bestY = subY;
+				found = true;
+			}
+		}
+
+		if (!found)
+			return false;
+
+		resultSubX = bestX;
+		resultSubY = bestY;
+
+		return true;
+	}
+
+	private void ProcessRushing(float dt)
+	{
+		RetractLineStep(dt);
+
+		_rushStepAccumulator += RushSpeed * dt;
+		int steps = 0;
+
+		while (_rushStepAccumulator >= 1f && steps < 20)
+		{
+			_rushStepAccumulator -= 1f;
+			steps++;
+
+			_rushX += _rushDirection.X;
+			_rushY += _rushDirection.Y;
+
+			int newSubX = Mathf.FloorToInt(_rushX);
+			int newSubY = Mathf.FloorToInt(_rushY);
+
+			if (newSubX == _rushSubX && newSubY == _rushSubY)
+				continue;
+
+			_rushSubX = newSubX;
+			_rushSubY = newSubY;
+
+			_tendril.RushMoveToSub(_rushSubX, _rushSubY);
+			ApplyRushInteractionsAt(_rushSubX, _rushSubY);
+
+			bool reachedX = (_rushDirection.X >= 0f && _rushSubX >= _rushAnchorSubX)
+				|| (_rushDirection.X < 0f && _rushSubX <= _rushAnchorSubX);
+			bool reachedY = (_rushDirection.Y >= 0f && _rushSubY >= _rushAnchorSubY)
+				|| (_rushDirection.Y < 0f && _rushSubY <= _rushAnchorSubY);
+
+			if (reachedX && reachedY)
+			{
+				FinishRush();
+				return;
+			}
+		}
+	}
+
+	private void ApplyRushInteractionsAt(int rushSubX, int rushSubY)
+	{
+		if (_creatureManager == null) return;
+
+		foreach (var creature in _creatureManager.GetAllCreatures())
+		{
+			if (creature == null || !creature.IsAlive || !creature.IsActive) continue;
+			if (_rushProcessed.Contains(creature)) continue;
+
+			int radius = (creature.Body?.Radius ?? 3) + RushConsumeRadius;
+			int dx = creature.SubX - rushSubX;
+			int dy = creature.SubY - rushSubY;
+			if (dx * dx + dy * dy > radius * radius)
+				continue;
+
+			if (creature.IsStunned)
+			{
+				var config = CreatureRegistry.GetConfig(creature.Species);
+				_tendril.AddHunger(config.HungerOnConsume);
+				_particles?.SpawnBurst(creature, rushSubX, rushSubY);
+				_creatureManager.KillCreatureExternal(creature);
+				_rushProcessed.Add(creature);
+				continue;
+			}
+
+			bool died = _creatureManager.DamageCreature(creature, RushDamageToNonStunned);
+			if (!died)
+			{
+				Vector2 knockDir = new Vector2(dx, dy);
+				if (knockDir.LengthSquared() < 0.001f)
+					knockDir = _rushDirection;
+				else
+					knockDir = knockDir.Normalized();
+
+				_creatureManager.ApplyImpulse(creature, knockDir * RushKnockback);
+			}
+
+			_rushProcessed.Add(creature);
+		}
+	}
+
+	private void FinishRush()
+	{
+		_rushProcessed.Clear();
+		_rushStepAccumulator = 0f;
+
+		if (_harpoonPath.Count > 0)
+			_state = HarpoonState.Retracting;
+		else
+			_state = HarpoonState.Idle;
 	}
 
 	private void FinishThrow()
@@ -925,6 +1226,8 @@ public partial class TendrilHarpoon : Node
 		_grabbedCreature = null;
 		_pulseCreature = null;
 		_grabPulseTimer = 0f;
+		_rushProcessed.Clear();
+		_rushStepAccumulator = 0f;
 		_state = HarpoonState.Idle;
 	}
 

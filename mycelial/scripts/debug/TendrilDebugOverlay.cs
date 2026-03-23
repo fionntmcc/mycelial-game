@@ -23,6 +23,7 @@ public partial class TendrilDebugOverlay : CanvasLayer
 
 	private TendrilController _controller;
 	private TendrilHead _head;
+	private TendrilHarpoon _harpoon;
 	private PanelContainer _panel;
 	private VBoxContainer _vbox;
 	private bool _visible;
@@ -34,6 +35,7 @@ public partial class TendrilDebugOverlay : CanvasLayer
 	private Label _hungerLabel;
 	private Label _slidingLabel;
 	private Label _infectedLabel;
+	private Label _throwModeLabel;
 
 	public override void _Ready()
 	{
@@ -47,6 +49,7 @@ public partial class TendrilDebugOverlay : CanvasLayer
 		{
 			_controller = GetNode<TendrilController>(TendrilControllerPath);
 			_head = _controller?.GetNodeOrNull<TendrilHead>("TendrilHead");
+			_harpoon = _controller?.Harpoon;
 		}
 
 		BuildUI();
@@ -73,6 +76,22 @@ public partial class TendrilDebugOverlay : CanvasLayer
 		_hungerLabel.Text = $"Hunger: {_controller.Hunger:F0} / {_controller.MaxHunger:F0}";
 		_slidingLabel.Text = _head.IsSlidingAlongWall ? "WALL SLIDE" : "";
 		_infectedLabel.Text = $"Claimed: {_controller.ClaimedTileCount}";
+
+		if (_harpoon == null)
+			_harpoon = _controller?.Harpoon;
+
+		if (_harpoon != null)
+		{
+			string mode = _harpoon.ThrowUnlocked
+				? (_harpoon.ThrowEnabled ? "ENABLED" : "DISABLED")
+				: "LOCKED";
+
+			_throwModeLabel.Text = $"Throw: {mode}";
+		}
+		else
+		{
+			_throwModeLabel.Text = "Throw: N/A";
+		}
 	}
 
 	private void BuildUI()
@@ -112,8 +131,10 @@ public partial class TendrilDebugOverlay : CanvasLayer
 		_tileLabel = AddLabel("Tile: (0, 0)");
 		_hungerLabel = AddLabel("Hunger: 100 / 100");
 		_infectedLabel = AddLabel("Claimed: 0");
+		_throwModeLabel = AddLabel("Throw: N/A");
 		_slidingLabel = AddLabel("");
 		_slidingLabel.AddThemeColorOverride("font_color", Colors.Cyan);
+		_throwModeLabel.AddThemeColorOverride("font_color", Colors.LightGoldenrod);
 
 		_vbox.AddChild(new HSeparator());
 

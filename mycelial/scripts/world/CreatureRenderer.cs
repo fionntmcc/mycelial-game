@@ -26,6 +26,8 @@ public partial class CreatureRenderer : Sprite2D
 	[Export] public int Padding = 8;
 	[Export] public Color DamageFlashColor = new(1f, 0.3f, 0.2f, 1f);
 	[Export] public float DamageFlashDuration = 0.12f;
+	[Export] public Color StunTintColor = new(0.75f, 0.85f, 1f, 1f);
+	[Export(PropertyHint.Range, "0,1,0.01")] public float StunTintStrength = 0.22f;
 
 	// --- State ---
 	private CreatureManager _creatureManager;
@@ -172,6 +174,10 @@ public partial class CreatureRenderer : Sprite2D
 		if (_harpoon != null && ReferenceEquals(_harpoon.PulseCreature, creature))
 			grabPulse = _harpoon.GrabPulseStrength;
 
+		float stunPulse = 0f;
+		if (creature.IsStunned)
+			stunPulse = 0.6f + 0.4f * Mathf.Sin(_animTime * 26f + creature.AnimTimeOffset);
+
 		for (int i = 0; i < body.Cells.Length; i++)
 		{
 			var (dx, dy) = body.Cells[i];
@@ -190,6 +196,9 @@ public partial class CreatureRenderer : Sprite2D
 
 			if (grabPulse > 0f)
 				color = color.Lerp(Colors.White, grabPulse * 0.45f);
+
+			if (creature.IsStunned)
+				color = color.Lerp(StunTintColor, StunTintStrength * stunPulse);
 
 			_image.SetPixel(px, py, color);
 		}

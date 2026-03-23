@@ -1098,6 +1098,38 @@ public partial class TendrilController : Node2D
 		if (Hunger <= 0) StartRetreat();
 	}
 
+	/// <summary>
+	/// Force-move the tendril head to a sub-cell during special attacks.
+	/// Ignores normal passability and hunger costs, but still updates trail/blob state.
+	/// </summary>
+	public void RushMoveToSub(int targetSubX, int targetSubY)
+	{
+		if (IsRetreating || IsRegenerating) return;
+		if (_subHeadX == targetSubX && _subHeadY == targetSubY) return;
+
+		_subTrail.Insert(0, (_subHeadX, _subHeadY));
+		_subStepsSinceTrailRecord = 0;
+		_momentum = Vector2.Zero;
+		_moveAccumulator = Vector2.Zero;
+
+		_trailAgeCounter++;
+		SubGrid.DemoteCoreToFresh(_currentCoreCells, _trailAgeCounter);
+
+		_subHeadX = targetSubX;
+		_subHeadY = targetSubY;
+
+		var (terrainX, terrainY) = SubGridData.SubToTerrain(targetSubX, targetSubY);
+		_lastTerrainX = terrainX;
+		_lastTerrainY = terrainY;
+
+		TileType tile = _chunkManager.GetTileAt(terrainX, terrainY);
+		if (tile != TileType.Air && !TileProperties.Is(tile, TileFlags.Liquid) && !TileProperties.Is(tile, TileFlags.Hazardous))
+			ClaimTerrainTile(terrainX, terrainY);
+
+		PlaceBlob();
+		EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
+	}
+
 	// =========================================================================
 	//  TREE REGISTRATION
 	// =========================================================================
