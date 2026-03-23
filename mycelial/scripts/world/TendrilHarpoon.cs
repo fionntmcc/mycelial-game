@@ -14,9 +14,8 @@ using Mycorrhiza.Data;
 ///
 /// CATCHING + THROWING:
 ///   When the harpoon grabs a creature:
-///   - If fire is RELEASED → normal retract → consume creature for hunger
 ///   - If fire is HELD → harpoon freezes, creature stays at tip
-///     → Player aims with movement input
+///     → Press L2 (or E on keyboard) to consume via retract
 ///     → Releasing fire LAUNCHES the creature as a projectile
 ///     → Projectile checks for creature slam and wall splat
 ///
@@ -64,6 +63,7 @@ public partial class TendrilHarpoon : Node
 	// --- Input ---
 	[Export] public float TriggerDeadZone = 0.3f;
 	[Export] public float StickDeadZone = 0.22f;
+	[Export] public float GrabPulseDuration = 0.14f;
 
 	// --- Slam / Throw Config ---
 
@@ -123,6 +123,10 @@ public partial class TendrilHarpoon : Node
 
 	// Grabbed creature
 	private Creature _grabbedCreature;
+	private Creature _pulseCreature;
+	private int _pulseTipSubX;
+	private int _pulseTipSubY;
+	private float _grabPulseTimer;
 
 	// Terrain tracking
 	private int _lastCheckedTerrainX;
@@ -138,6 +142,8 @@ public partial class TendrilHarpoon : Node
 	// Input state
 	private bool _wasSpaceHeld;
 	private bool _wasTriggerHeld;
+	private bool _wasEatKeyHeld;
+	private bool _wasLeftTriggerHeld;
 
 	// --- Signals ---
 	[Signal] public delegate void ChargeStartedEventHandler();
@@ -154,6 +160,25 @@ public partial class TendrilHarpoon : Node
 
 	/// <summary>True when armed and waiting for throw.</summary>
 	public bool IsArmed => _state == HarpoonState.Armed;
+
+	/// <summary>Active pulse amount for grab feedback (0-1).</summary>
+	public float GrabPulseStrength
+	{
+		get
+		{
+			if (_grabPulseTimer <= 0f || GrabPulseDuration <= 0f)
+				return 0f;
+
+			float progress = 1f - Mathf.Clamp(_grabPulseTimer / GrabPulseDuration, 0f, 1f);
+			return Mathf.Sin(progress * Mathf.Pi);
+		}
+	}
+
+	/// <summary>Creature that should receive the active grab pulse.</summary>
+	public Creature PulseCreature => GrabPulseStrength > 0f ? _pulseCreature : null;
+
+	/// <summary>Harpoon tip sub-grid position for the active grab pulse.</summary>
+	public Vector2I PulseTipSubPosition => new(_pulseTipSubX, _pulseTipSubY);
 
 	/// <summary>0–1 charge indicator for HUD.</summary>
 	public float ChargePercent => _state == HarpoonState.Winding
@@ -186,6 +211,8 @@ public partial class TendrilHarpoon : Node
 		}
 
 		float dt = (float)delta;
+		if (_grabPulseTimer > 0f)
+			_grabPulseTimer = Mathf.Max(0f, _grabPulseTimer - dt);
 
 		switch (_state)
 		{
@@ -371,6 +398,7 @@ public partial class TendrilHarpoon : Node
 		{
 			PlaceHarpoonCell(newSubX, newSubY);
 			_grabbedCreature = hitCreature;
+			TriggerGrabPulse(hitCreature, newSubX, newSubY);
 			EmitSignal(SignalName.CreatureGrabbed, hitCreature.SubX, hitCreature.SubY);
 
 			// KEY DECISION: is fire still held?
@@ -434,6 +462,14 @@ public partial class TendrilHarpoon : Node
 		{
 			var (tipX, tipY) = _harpoonPath[^1];
 			_creatureManager?.ForceCreatureSubPosition(_grabbedCreature, tipX, tipY);
+		}
+
+		// Explicit consume input while armed.
+		if (IsFireInputHeld() && IsConsumeInputPressed())
+		{
+			GD.Print($"Harpoon consumed {_grabbedCreature.Species} via L2/E.");
+			StartRetract();
+			return;
 		}
 
 		// Player releases fire → THROW in aimed direction
@@ -887,7 +923,17 @@ public partial class TendrilHarpoon : Node
 		}
 
 		_grabbedCreature = null;
+		_pulseCreature = null;
+		_grabPulseTimer = 0f;
 		_state = HarpoonState.Idle;
+	}
+
+	private void TriggerGrabPulse(Creature creature, int tipSubX, int tipSubY)
+	{
+		_pulseCreature = creature;
+		_pulseTipSubX = tipSubX;
+		_pulseTipSubY = tipSubY;
+		_grabPulseTimer = Mathf.Max(0f, GrabPulseDuration);
 	}
 
 	// =========================================================================
@@ -990,5 +1036,36 @@ public partial class TendrilHarpoon : Node
 		var joypads = Input.GetConnectedJoypads();
 		if (joypads.Count == 0) return 0f;
 		return Input.GetJoyAxis(joypads[0], JoyAxis.TriggerRight);
+	}
+
+	private bool IsConsumeInputPressed()
+	{
+		bool eatKeyNow = Input.IsKeyPressed(Key.E);
+		if (eatKeyNow && !_wasEatKeyHeld)
+		{
+			_wasEatKeyHeld = true;
+			return true;
+		}
+		if (!eatKeyNow)
+			_wasEatKeyHeld = false;
+
+		float leftTrigger = GetL2Value();
+		bool leftHeldNow = leftTrigger > TriggerDeadZone;
+		if (leftHeldNow && !_wasLeftTriggerHeld)
+		{
+			_wasLeftTriggerHeld = true;
+			return true;
+		}
+		if (!leftHeldNow)
+			_wasLeftTriggerHeld = false;
+
+		return false;
+	}
+
+	private float GetL2Value()
+	{
+		var joypads = Input.GetConnectedJoypads();
+		if (joypads.Count == 0) return 0f;
+		return Input.GetJoyAxis(joypads[0], JoyAxis.TriggerLeft);
 	}
 }

@@ -108,12 +108,13 @@ script = ExtResource("12_q5onr")
 TendrilControllerPath = NodePath("../TendrilController")
 ChunkManagerPath = NodePath("../ChunkManager")
 CreatureManagerPath = NodePath("../CreatureManager")
+ParticlesPath = NodePath("../CreatureParticles")
 GuidedStepDelay = 0.015
 GuidedSubStepsPerTick = 1
 GuidedTurnRate = 7.0
 HarpoonThickness = 1
 ShapeIrregularity = 1.0
-ParticlesPath = NodePath("../CreatureParticles")
+GrabPulseDuration = 1.0
 
 [node name="CreatureRenderer" type="Sprite2D" parent="." unique_id=369762693]
 script = ExtResource("13_jhx03")

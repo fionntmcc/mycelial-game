@@ -31,6 +31,7 @@ public partial class CreatureRenderer : Sprite2D
 	private CreatureManager _creatureManager;
 	private Camera2D _camera;
 	private TendrilController _tendril;
+	private TendrilHarpoon _harpoon;
 	private Image _image;
 	private ImageTexture _texture;
 	private int _imgWidth;
@@ -64,6 +65,7 @@ public partial class CreatureRenderer : Sprite2D
 		ZIndex = 101;
 
 		_lastZoom = _camera.Zoom.X;
+		_harpoon = _tendril?.Harpoon;
 		RebuildImage();
 	}
 
@@ -151,6 +153,9 @@ public partial class CreatureRenderer : Sprite2D
 
 	private void PaintCreature(Creature creature, int originSubX, int originSubY)
 	{
+		if (_harpoon == null)
+			_harpoon = _tendril?.Harpoon;
+
 		var bodySet = CreatureBodyRegistry.GetBodySet(creature.Species);
 		bool isMoving = creature.Velocity.LengthSquared() > 0.5f;
 		var body = isMoving ? bodySet.GetFrame(_animTime + creature.AnimTimeOffset)
@@ -162,6 +167,10 @@ public partial class CreatureRenderer : Sprite2D
 		float flashLerp = flashing
 			? Mathf.Clamp(creature.DamageFlashTimer / DamageFlashDuration, 0f, 1f)
 			: 0f;
+
+		float grabPulse = 0f;
+		if (_harpoon != null && ReferenceEquals(_harpoon.PulseCreature, creature))
+			grabPulse = _harpoon.GrabPulseStrength;
 
 		for (int i = 0; i < body.Cells.Length; i++)
 		{
@@ -178,6 +187,9 @@ public partial class CreatureRenderer : Sprite2D
 
 			if (flashing)
 				color = color.Lerp(DamageFlashColor, flashLerp * 0.7f);
+
+			if (grabPulse > 0f)
+				color = color.Lerp(Colors.White, grabPulse * 0.45f);
 
 			_image.SetPixel(px, py, color);
 		}

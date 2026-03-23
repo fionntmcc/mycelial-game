@@ -85,6 +85,7 @@ public partial class TendrilRenderer : Sprite2D
 	[Export(PropertyHint.Range, "1,15,0.5")] public float SpeedSmoothing = 4.0f;
 
 	private TendrilController _tendril;
+	private TendrilHarpoon _harpoon;
 	private Camera2D _camera;
 	private TendrilSplineRenderer _splineRenderer;
 	private float _pulseTimer;
@@ -107,6 +108,7 @@ public partial class TendrilRenderer : Sprite2D
 			_camera = GetNode<Camera2D>(CameraPath);
 		if (SplineRendererPath != null)
 			_splineRenderer = GetNode<TendrilSplineRenderer>(SplineRendererPath);
+		_harpoon = _tendril?.Harpoon;
 
 		if (_tendril == null || _camera == null)
 		{
@@ -265,6 +267,8 @@ public partial class TendrilRenderer : Sprite2D
 		_image.Fill(Colors.Transparent);
 
 		float pulse = (Mathf.Sin(_pulseTimer) + 1f) * 0.5f;
+		if (_harpoon == null)
+			_harpoon = _tendril?.Harpoon;
 
 		// --- Pass 1: Spline-based aura glow ---
 		if (AuraSpread > 0 && _splineRenderer != null)
@@ -323,6 +327,47 @@ public partial class TendrilRenderer : Sprite2D
 				continue;
 
 			_image.SetPixel(px, py, GetCellColor(cell, pulse, sx, sy));
+		}
+
+		// Split-second grab feedback at the harpoon tip.
+		if (_harpoon != null)
+		{
+			float grabPulse = _harpoon.GrabPulseStrength;
+			if (grabPulse > 0f)
+			{
+				Vector2I tip = _harpoon.PulseTipSubPosition;
+				int tipPx = tip.X - originSubX;
+				int tipPy = tip.Y - originSubY;
+
+				if (tipPx >= 0 && tipPx < _imgWidth && tipPy >= 0 && tipPy < _imgHeight)
+				{
+					int radius = 2;
+					for (int oy = -radius; oy <= radius; oy++)
+					{
+						for (int ox = -radius; ox <= radius; ox++)
+						{
+							int px = tipPx + ox;
+							int py = tipPy + oy;
+							if (px < 0 || px >= _imgWidth || py < 0 || py >= _imgHeight)
+								continue;
+
+							float dist = Mathf.Sqrt(ox * ox + oy * oy);
+							if (dist > radius)
+								continue;
+
+							float falloff = 1f - (dist / radius);
+							Color overlay = new Color(
+								CorePulseColor.R,
+								CorePulseColor.G,
+								CorePulseColor.B,
+								0.45f * grabPulse * falloff);
+
+							Color current = _image.GetPixel(px, py);
+							_image.SetPixel(px, py, current.Blend(overlay));
+						}
+					}
+				}
+			}
 		}
 
 		_texture.Update(_image);

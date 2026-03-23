@@ -96,6 +96,9 @@ public partial class TendrilController : Node2D
 	/// <summary>Current movement speed (0–1) for camera shake scaling.</summary>
 	public float CurrentSpeed => Mathf.Clamp(_momentum.Length(), 0f, 1f);
 
+	/// <summary>Current harpoon instance for render/UI systems.</summary>
+	public TendrilHarpoon Harpoon => _harpoon;
+
 	/// <summary>
 	/// Collision impulse for the camera. Set when the tendril hits a wall,
 	/// points in the direction of the blocked movement. Magnitude = impact force.
