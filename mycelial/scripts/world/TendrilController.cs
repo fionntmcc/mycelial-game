@@ -396,19 +396,16 @@ public partial class TendrilController : Node2D
 			_momentum = _momentum.MoveToward(Vector2.Zero, MomentumDrag * dt);
 		}
 
-		// --- Creature Auto-Steer ---
+		// --- Creature Auto-Steer (sub-grid precision) ---
 		// Subtly nudge momentum toward nearby creatures (prey attraction).
 		if (_creatureManager != null && _momentum.Length() > MomentumDeadZone && CreatureSteerStrength > 0f)
 		{
-			var nearest = _creatureManager.GetNearestCreaturePosition(HeadX, HeadY, CreatureSteerRadius);
+			int steerRadiusSub = CreatureSteerRadius * WorldConfig.SubGridScale;
+			var nearest = _creatureManager.GetNearestCreatureSubPosition(_subHeadX, _subHeadY, steerRadiusSub);
 			if (nearest.HasValue)
 			{
-				// Direction from head to creature in sub-grid space
-				int scale = WorldConfig.SubGridScale;
-				Vector2 creatureSubPos = new Vector2(
-					nearest.Value.X * scale + scale / 2f,
-					nearest.Value.Y * scale + scale / 2f
-				);
+				// Direction from head to creature — both in sub-grid space, no conversion needed
+				Vector2 creatureSubPos = new Vector2(nearest.Value.SubX, nearest.Value.SubY);
 				Vector2 headPos = new Vector2(_subHeadX, _subHeadY);
 				Vector2 toCreature = (creatureSubPos - headPos).Normalized();
 
@@ -1162,38 +1159,6 @@ public partial class TendrilController : Node2D
 	public bool HasSubGridCellsInTile(int worldX, int worldY)
 	{
 		return SubGrid.HasCellsInTerrainTile(worldX, worldY);
-	}
-
-	/// <summary>
-	/// Eat (remove) all sub-grid cells within a terrain tile and unclaim it.
-	/// Used by Grazer creatures to destroy tendril territory.
-	/// Returns true if any cells were actually eaten.
-	/// </summary>
-	public bool EatSubGridCellsInTile(int worldX, int worldY)
-	{
-		int scale = WorldConfig.SubGridScale;
-		int subMinX = worldX * scale;
-		int subMinY = worldY * scale;
-		bool ate = false;
-
-		for (int dy = 0; dy < scale; dy++)
-		{
-			for (int dx = 0; dx < scale; dx++)
-			{
-				int sx = subMinX + dx;
-				int sy = subMinY + dy;
-				if (SubGrid.HasCell(sx, sy))
-				{
-					SubGrid.ClearCell(sx, sy);
-					ate = true;
-				}
-			}
-		}
-
-		if (ate)
-			_claimedTiles.Remove(PackCoords(worldX, worldY));
-
-		return ate;
 	}
 
 	/// <summary>Pack terrain coordinates into a single long key.</summary>

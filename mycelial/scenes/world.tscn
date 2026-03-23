@@ -12,6 +12,7 @@
 [ext_resource type="Script" uid="uid://b274d7dh216dp" path="res://scripts/debug/TendrilDebugOverlay.cs" id="10_w7kh3"]
 [ext_resource type="Script" uid="uid://bb37pjfigfgk3" path="res://scripts/world/TendrilRenderer.cs" id="11_e3hyu"]
 [ext_resource type="Script" uid="uid://eti3psjumq4a" path="res://scripts/world/TendrilHarpoon.cs" id="12_q5onr"]
+[ext_resource type="Script" uid="uid://csfalpa7uatxs" path="res://scripts/world/CreatureRenderer.cs" id="13_jhx03"]
 
 [node name="World" type="Node2D" unique_id=185312821]
 
@@ -47,6 +48,7 @@ BlobBaseRadius = 1
 BlobNoiseAmplitude = 3.0
 BlobNoiseFrequency = 3.0
 BlobStretchFactor = 0.3
+CreatureManagerPath = NodePath("../CreatureManager")
 HarpoonPath = NodePath("../TendrilHarpoon")
 
 [node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
@@ -59,11 +61,6 @@ SpreadsPerTick = 2
 script = ExtResource("8_4mrxx")
 ChunkManagerPath = NodePath("../ChunkManager")
 TendrilControllerPath = NodePath("../TendrilController")
-
-[node name="CreatureManager" type="Node2D" parent="CreatureManager" unique_id=1653449213]
-script = ExtResource("8_4mrxx")
-ChunkManagerPath = NodePath("../ChunkManager")
-TendrilControllerPath = NodePath("../../TendrilController")
 
 [node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=145948951]
 script = ExtResource("10_w7kh3")
@@ -84,9 +81,6 @@ WritheStrength = 20.0
 WritheScale = 6.0
 MottleStrength = 1.0
 MottleScale = 3.0
-ShaderPulseSpeed = 3.0
-ShaderPulseStrength = 0.7
-ShaderPulseWavelength = 20.0
 EdgeWobbleSpeed = 2.5
 EdgeWobbleStrength = 6.0
 EdgeWobbleScale = 4.0
@@ -117,3 +111,8 @@ GuidedSubStepsPerTick = 1
 GuidedTurnRate = 7.0
 HarpoonThickness = 1
 ShapeIrregularity = 1.0
+
+[node name="CreatureRenderer" type="Sprite2D" parent="." unique_id=369762693]
+script = ExtResource("13_jhx03")
+CreatureManagerPath = NodePath("../CreatureManager")
+CameraPath = NodePath("../TendrilCamera")

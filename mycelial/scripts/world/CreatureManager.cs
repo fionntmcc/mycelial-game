@@ -7,660 +7,915 @@ using Mycorrhiza.Data;
 
 /// <summary>
 /// A single living creature in the world.
-/// Stored as pure data — no Godot nodes. Rendered by CreatureManager.
+/// Now lives on the sub-grid (4px resolution) alongside the tendril.
+///
+/// Position truth is (SubX, SubY) in sub-grid coordinates.
+/// Terrain-tile coordinates are derived for gameplay checks (biome, spawn, despawn).
 /// </summary>
 public class Creature
 {
 	public CreatureSpecies Species;
-	public int X, Y;                // World tile position
+	public bool IsAlive;
+	public bool IsActive;          // False = dormant (burrowed/ambush), invisible
 	public int Health;
 	public CreatureBehavior Behavior;
-	public float MoveTimer;         // Countdown to next move
-	public float AttackCooldown;    // Countdown to next attack
-	public bool IsActive;           // False = dormant (burrowed/ambush)
-	public bool IsAlive;
-	public int PatrolOriginX, PatrolOriginY; // For patrol behavior
-	public int FleeTargetX, FleeTargetY;     // Where it's running to
+
+	// === Sub-Grid Position (source of truth) ===
+	public int SubX, SubY;
+	public Vector2 Velocity;           // Current movement direction × speed
+	public Vector2 MoveAccumulator;    // Fractional sub-cell accumulation
+
+	// === Derived terrain coords (for biome checks, despawn distance, etc.) ===
+	public int TileX => SubGridData.SubToTerrain(SubX, SubY).TerrainX;
+	public int TileY => SubGridData.SubToTerrain(SubX, SubY).TerrainY;
+
+	// === AI State ===
+	public float MoveTimer;            // Countdown to next direction change
+	public float AttackCooldown;
+	public int PatrolOriginSubX, PatrolOriginSubY;
 	public bool IsFleeing;
 
-	// Visual
-	public int TileAtPosition;      // What tile was here before creature spawned (to restore on move)
+	// === Visual ===
+	public CreatureBody Body;
+	public float AnimTimeOffset;       // Per-creature offset so they don't all animate in sync
+    public float DamageFlashTimer;     // Counts down from DamageFlashDuration on hit
 }
 
 /// <summary>
-/// Manages all creatures in the world. Handles spawning, AI updates,
-/// rendering (as tile overlays), and interaction with the tendril.
+/// Manages all creatures in the world. Handles spawning, sub-grid AI movement,
+/// pixel-perfect collision with the tendril, and creature-to-creature interaction.
 ///
-/// Creatures are stored as data, not Godot nodes. They occupy tiles in the
-/// world and are rendered by temporarily placing creature tiles.
+/// Creatures are no longer rendered as tile overlays. They are pure data objects
+/// painted by CreatureRenderer onto the same image layer as the tendril.
 ///
 /// SETUP:
-///   - Add as child of World
+///   - Add as child of World (Node2D)
 ///   - Assign ChunkManagerPath and TendrilControllerPath
+///   - Add a CreatureRenderer Sprite2D and point it at this node
 /// </summary>
 public partial class CreatureManager : Node2D
 {
-	[Export] public NodePath ChunkManagerPath { get; set; }
-	[Export] public NodePath TendrilControllerPath { get; set; }
-
-	// --- Spawn Config ---
-	[Export] public float SpawnCheckInterval = 2.0f;  // How often to check for new spawns
-	[Export] public int MaxCreatures = 60;             // Global creature cap
-	[Export] public int SpawnRadius = 40;              // Spawn within this radius of tendril head
-	[Export] public int DespawnRadius = 80;            // Remove creatures beyond this distance
-	[Export] public int MinSpawnDistance = 8;           // Don't spawn right on top of the player
-
-	private ChunkManager _chunkManager;
-	private TendrilController _tendril;
-	private readonly List<Creature> _creatures = new();
-	private float _spawnTimer;
-	private readonly Random _rng = new();
-
-	// Creature tile IDs — add these to your tileset
-	// They use TileType values 144+
-	private const int CreatureTileBase = 144;
-
-	public override void _Ready()
-	{
-		if (ChunkManagerPath != null)
-			_chunkManager = GetNode<ChunkManager>(ChunkManagerPath);
-		if (TendrilControllerPath != null)
-			_tendril = GetNode<TendrilController>(TendrilControllerPath);
-
-		if (_chunkManager == null || _tendril == null)
-			GD.PrintErr("CreatureManager: Missing ChunkManager or TendrilController!");
-	}
-
-	public override void _Process(double delta)
-	{
-		if (_chunkManager == null || _tendril == null) return;
-		if (_tendril.IsRetreating || _tendril.IsRegenerating) return;
-
-		float dt = (float)delta;
-
-		// Spawn new creatures periodically
-		_spawnTimer -= dt;
-		if (_spawnTimer <= 0)
-		{
-			_spawnTimer = SpawnCheckInterval;
-			TrySpawnCreatures();
-			DespawnDistantCreatures();
-		}
-
-		// Update all creatures
-		for (int i = _creatures.Count - 1; i >= 0; i--)
-		{
-			var creature = _creatures[i];
-			if (!creature.IsAlive)
-			{
-				_creatures.RemoveAt(i);
-				continue;
-			}
-
-			UpdateCreature(creature, dt);
-			CheckTendrilInteraction(creature);
-		}
-	}
-
-	// =========================================================================
-	//  SPAWNING
-	// =========================================================================
-
-	private void TrySpawnCreatures()
-	{
-		if (_creatures.Count >= MaxCreatures) return;
-
-		int headX = _tendril.HeadX;
-		int headY = _tendril.HeadY;
-
-		// Determine biome at tendril position to know what can spawn
-		BiomeType currentBiome = _chunkManager.GetBiomeAt(headX, headY);
-		var validSpecies = CreatureRegistry.GetForBiome(currentBiome);
-		if (validSpecies.Count == 0) return;
-
-		// Also check nearby biomes (creatures from adjacent biomes can wander in)
-		BiomeType nearbyBiome = _chunkManager.GetBiomeAt(headX + 30, headY);
-		if (nearbyBiome != currentBiome)
-		{
-			var nearbySpecies = CreatureRegistry.GetForBiome(nearbyBiome);
-			foreach (var s in nearbySpecies)
-			{
-				if (_rng.Next(3) == 0) // 33% chance to include nearby biome creatures
-					validSpecies.Add(s);
-			}
-		}
-
-		// Try to spawn 1-3 creatures per check
-		int toSpawn = 1 + _rng.Next(3);
-
-		for (int i = 0; i < toSpawn; i++)
-		{
-			if (_creatures.Count >= MaxCreatures) break;
-
-			// Pick a random species
-			var config = validSpecies[_rng.Next(validSpecies.Count)];
-
-			// Find a valid spawn position
-			if (TryFindSpawnPosition(headX, headY, out int sx, out int sy))
-			{
-				SpawnCreature(config, sx, sy);
-			}
-		}
-	}
-
-	private bool TryFindSpawnPosition(int centerX, int centerY, out int x, out int y)
-	{
-		// Try several random positions
-		for (int attempt = 0; attempt < 15; attempt++)
-		{
-			x = centerX + _rng.Next(-SpawnRadius, SpawnRadius + 1);
-			y = centerY + _rng.Next(-SpawnRadius, SpawnRadius + 1);
-
-			// Enforce minimum distance from tendril
-			int dx = x - _tendril.HeadX;
-			int dy = y - _tendril.HeadY;
-			if (dx * dx + dy * dy < MinSpawnDistance * MinSpawnDistance) continue;
-
-			// Must be in a cave (air tile) or on organic ground
-			TileType tile = _chunkManager.GetTileAt(x, y);
-			if (tile == TileType.Air) return true;
-
-			// Some creatures burrow in soil
-			if (TileProperties.Is(tile, TileFlags.Organic) && !TileProperties.Is(tile, TileFlags.PlayerOwned))
-				return true;
-		}
-
-		x = 0; y = 0;
-		return false;
-	}
-
-	private void SpawnCreature(CreatureConfig config, int x, int y)
-	{
-		var creature = new Creature
-		{
-			Species = config.Species,
-			X = x,
-			Y = y,
-			Health = config.Health,
-			Behavior = config.Behavior,
-			MoveTimer = config.MoveSpeed * (0.5f + _rng.NextSingle()), // Stagger initial timers
-			AttackCooldown = 0,
-			IsActive = config.Behavior != CreatureBehavior.Burrowed
-					&& config.Behavior != CreatureBehavior.Ambush,
-			IsAlive = true,
-			PatrolOriginX = x,
-			PatrolOriginY = y,
-			IsFleeing = false,
-		};
-
-		// Store what tile was here so we can restore it when creature moves
-		creature.TileAtPosition = (int)_chunkManager.GetTileAt(x, y);
-
-		_creatures.Add(creature);
-
-		// Place creature tile (only if active/visible)
-		if (creature.IsActive)
-			PlaceCreatureTile(creature);
-	}
-
-	private void DespawnDistantCreatures()
-	{
-		int headX = _tendril.HeadX;
-		int headY = _tendril.HeadY;
-
-		for (int i = _creatures.Count - 1; i >= 0; i--)
-		{
-			var c = _creatures[i];
-			int dx = c.X - headX;
-			int dy = c.Y - headY;
-			if (dx * dx + dy * dy > DespawnRadius * DespawnRadius)
-			{
-				// Restore tile and remove
-				RestoreCreatureTile(c);
-				_creatures.RemoveAt(i);
-			}
-		}
-	}
-
-	// =========================================================================
-	//  AI UPDATE
-	// =========================================================================
-
-	private void UpdateCreature(Creature creature, float dt)
-	{
-		var config = CreatureRegistry.GetConfig(creature.Species);
-
-		// Attack cooldown
-		if (creature.AttackCooldown > 0)
-			creature.AttackCooldown -= dt;
-
-		// Movement timer
-		creature.MoveTimer -= dt;
-		if (creature.MoveTimer > 0) return;
-		creature.MoveTimer = config.MoveSpeed;
-
-		int headX = _tendril.HeadX;
-		int headY = _tendril.HeadY;
-		int dx = headX - creature.X;
-		int dy = headY - creature.Y;
-		int distSq = dx * dx + dy * dy;
-		int dist = (int)MathF.Sqrt(distSq);
-
-		switch (creature.Behavior)
-		{
-			case CreatureBehavior.Wander:
-				MoveRandom(creature);
-				break;
-
-			case CreatureBehavior.Skittish:
-				if (dist <= config.DetectRange)
-				{
-					creature.IsFleeing = true;
-					MoveAwayFrom(creature, headX, headY);
-				}
-				else
-				{
-					creature.IsFleeing = false;
-					MoveRandom(creature);
-				}
-				break;
-
-			case CreatureBehavior.Burrowed:
-				if (!creature.IsActive)
-				{
-					// Dormant — check if tendril is close enough to wake up
-					if (dist <= config.DetectRange)
-					{
-						creature.IsActive = true;
-						creature.IsFleeing = true;
-						PlaceCreatureTile(creature);
-					}
-				}
-				else
-				{
-					// Awake and fleeing
-					MoveAwayFrom(creature, headX, headY);
-					if (dist > config.FleeRange)
-					{
-						// Escaped — re-burrow
-						creature.IsActive = false;
-						creature.IsFleeing = false;
-						RestoreCreatureTile(creature);
-					}
-				}
-				break;
-
-			case CreatureBehavior.Patrol:
-				if (dist <= config.DetectRange)
-				{
-					// Chase the tendril
-					MoveToward(creature, headX, headY);
-				}
-				else
-				{
-					// Patrol around origin point
-					int patrolDx = creature.X - creature.PatrolOriginX;
-					int patrolDy = creature.Y - creature.PatrolOriginY;
-					if (patrolDx * patrolDx + patrolDy * patrolDy > 100)
-					{
-						// Too far from origin, head back
-						MoveToward(creature, creature.PatrolOriginX, creature.PatrolOriginY);
-					}
-					else
-					{
-						MoveRandom(creature);
-					}
-				}
-				break;
-
-			case CreatureBehavior.Ambush:
-				if (!creature.IsActive)
-				{
-					if (dist <= config.DetectRange)
-					{
-						creature.IsActive = true;
-						PlaceCreatureTile(creature);
-					}
-				}
-				else
-				{
-					// Active — chase the tendril
-					MoveToward(creature, headX, headY);
-
-					// Give up if tendril gets too far
-					if (dist > config.DetectRange * 3)
-					{
-						creature.IsActive = false;
-						RestoreCreatureTile(creature);
-					}
-				}
-				break;
-
-			case CreatureBehavior.Grazer:
-				// Seek out mycelium tiles and eat them
-				if (_tendril.IsOnTerritory(creature.X, creature.Y))
-				{
-					// Eat the mycelium tile we're standing on
-					_chunkManager.SetTileAt(creature.X, creature.Y, TileType.Air);
-					_tendril.ClaimedTiles.Remove(TendrilController.PackCoords(creature.X, creature.Y));
-					creature.TileAtPosition = (int)TileType.Air;
-				}
-
-				// Move toward nearest mycelium
-				if (dist <= config.DetectRange)
-				{
-					// If close to tendril head, move toward territory
-					MoveTowardMycelium(creature);
-				}
-				else
-				{
-					MoveRandom(creature);
-				}
-				break;
-		}
-	}
-
-	// =========================================================================
-	//  MOVEMENT HELPERS
-	// =========================================================================
-
-	private void MoveRandom(Creature creature)
-	{
-		int dir = _rng.Next(4);
-		int nx = creature.X + (dir == 0 ? -1 : dir == 1 ? 1 : 0);
-		int ny = creature.Y + (dir == 2 ? -1 : dir == 3 ? 1 : 0);
-		TryMoveCreature(creature, nx, ny);
-	}
-
-	private void MoveToward(Creature creature, int targetX, int targetY)
-	{
-		int dx = targetX - creature.X;
-		int dy = targetY - creature.Y;
-
-		// Move in the axis with the greater distance (with some randomness)
-		int nx = creature.X;
-		int ny = creature.Y;
-
-		if (Math.Abs(dx) >= Math.Abs(dy) || (_rng.Next(3) == 0 && dy != 0))
-		{
-			if (Math.Abs(dy) > Math.Abs(dx) || _rng.Next(3) == 0)
-				ny += Math.Sign(dy);
-			else
-				nx += Math.Sign(dx);
-		}
-		else
-		{
-			nx += Math.Sign(dx);
-		}
-
-		if (!TryMoveCreature(creature, nx, ny))
-		{
-			// Blocked — try the other axis
-			nx = creature.X;
-			ny = creature.Y;
-			if (dx != 0) nx += Math.Sign(dx);
-			else if (dy != 0) ny += Math.Sign(dy);
-			TryMoveCreature(creature, nx, ny);
-		}
-	}
-
-	private void MoveAwayFrom(Creature creature, int threatX, int threatY)
-	{
-		int dx = creature.X - threatX;
-		int dy = creature.Y - threatY;
-
-		int nx = creature.X + Math.Sign(dx);
-		int ny = creature.Y + Math.Sign(dy);
-
-		// Try primary direction first
-		if (!TryMoveCreature(creature, nx, creature.Y))
-		{
-			if (!TryMoveCreature(creature, creature.X, ny))
-			{
-				// Cornered — try random
-				MoveRandom(creature);
-			}
-		}
-	}
-
-	private void MoveTowardMycelium(Creature creature)
-	{
-		// Simple: check 4 neighbors, move toward any that has mycelium
-		int[] offsets = { -1, 0, 1, 0, 0, -1, 0, 1 };
-		for (int i = 0; i < 8; i += 2)
-		{
-			int nx = creature.X + offsets[i];
-			int ny = creature.Y + offsets[i + 1];
-			TileType t = _chunkManager.GetTileAt(nx, ny);
-			if (TileProperties.IsMycelium(t))
-			{
-				TryMoveCreature(creature, nx, ny);
-				return;
-			}
-		}
-		// No mycelium nearby — wander
-		MoveRandom(creature);
-	}
-
-	private bool TryMoveCreature(Creature creature, int newX, int newY)
-	{
-		TileType target = _chunkManager.GetTileAt(newX, newY);
-
-		// Creatures can move through air, organic tiles, and mycelium
-		bool canMove = target == TileType.Air
-			|| TileProperties.Is(target, TileFlags.Organic)
-			|| TileProperties.Is(target, TileFlags.PlayerOwned);
-
-		// Can't walk into unbreakable solids or liquids
-		if (TileProperties.Is(target, TileFlags.Solid) && !TileProperties.Is(target, TileFlags.Organic)
-			&& !TileProperties.Is(target, TileFlags.PlayerOwned))
-			canMove = false;
-		if (TileProperties.Is(target, TileFlags.Liquid))
-			canMove = false;
-
-		if (!canMove) return false;
-
-		// Check for other creatures at target
-		foreach (var other in _creatures)
-		{
-			if (other != creature && other.IsAlive && other.X == newX && other.Y == newY)
-				return false;
-		}
-
-		// Restore old tile
-		RestoreCreatureTile(creature);
-
-		// Move
-		creature.X = newX;
-		creature.Y = newY;
-		creature.TileAtPosition = (int)target;
-
-		// Place creature at new position
-		if (creature.IsActive)
-			PlaceCreatureTile(creature);
-
-		return true;
-	}
-
-	// =========================================================================
-	//  TENDRIL INTERACTION
-	// =========================================================================
-
-	private void CheckTendrilInteraction(Creature creature)
-	{
-		if (!creature.IsAlive || !creature.IsActive) return;
-
-		// Check if tendril head overlaps this creature
-		if (!_tendril.OverlapsHead(creature.X, creature.Y)) return;
-
-		var config = CreatureRegistry.GetConfig(creature.Species);
-
-		bool isThreat = config.DamageOnHit > 0;
-
-		if (isThreat)
-		{
-			// Threat creature — damages the tendril
-			if (creature.AttackCooldown <= 0)
-			{
-				_tendril.DrainHunger(config.DamageOnHit);
-				creature.AttackCooldown = config.HitCooldown;
-
-				// Tendril damages the creature back (one hit per contact)
-				creature.Health--;
-				if (creature.Health <= 0)
-				{
-					// Killed the threat — bonus hunger!
-					_tendril.AddHunger(config.HungerOnConsume);
-					KillCreature(creature);
-					GD.Print($"Killed {creature.Species}! +{config.HungerOnConsume} hunger");
-				}
-				else
-				{
-					GD.Print($"{creature.Species} hit you! -{config.DamageOnHit} hunger. HP: {creature.Health}");
-				}
-			}
-		}
-		else
-		{
-			// Prey creature — consumed immediately
-			_tendril.AddHunger(config.HungerOnConsume);
-			KillCreature(creature);
-			GD.Print($"Consumed {creature.Species}! +{config.HungerOnConsume} hunger");
-		}
-	}
-
-	private void KillCreature(Creature creature)
-	{
-		creature.IsAlive = false;
-		RestoreCreatureTile(creature);
-	}
-
-	// =========================================================================
-	//  HARPOON SUPPORT (new methods for TendrilHarpoon)
-	// =========================================================================
-
-	/// <summary>
-	/// Find a living, active creature at the given tile position.
-	/// Returns null if no creature is there.
-	/// </summary>
-	public Creature GetCreatureAt(int worldX, int worldY)
-	{
-		foreach (var creature in _creatures)
-		{
-			if (creature.IsAlive && creature.IsActive
-				&& creature.X == worldX && creature.Y == worldY)
-			{
-				return creature;
-			}
-		}
-		return null;
-	}
-
-	/// <summary>
-	/// Kill a creature from an external source (e.g. harpoon delivery).
-	/// </summary>
-	public void KillCreatureExternal(Creature creature)
-	{
-		if (creature == null || !creature.IsAlive) return;
-		KillCreature(creature);
-	}
-
-	/// <summary>
-	/// Forcibly move a creature to a new position (used by harpoon retraction).
-	/// Handles tile save/restore so the creature doesn't leave ghost tiles.
-	/// </summary>
-	public void ForceCreaturePosition(Creature creature, int newX, int newY)
-	{
-		if (creature == null || !creature.IsAlive) return;
-
-		// Restore tile at old position
-		RestoreCreatureTile(creature);
-
-		// Move
-		creature.X = newX;
-		creature.Y = newY;
-		creature.TileAtPosition = (int)_chunkManager.GetTileAt(newX, newY);
-
-		// Place creature tile at new position
-		if (creature.IsActive)
-			PlaceCreatureTile(creature);
-	}
-
-	// =========================================================================
-	//  CREATURE AUTO-STEER SUPPORT (for TendrilController prey attraction)
-	// =========================================================================
-
-	/// <summary>
-	/// Find the nearest living, active creature within a radius of a position.
-	/// Returns the creature's tile position, or null if none found.
+    [Export] public NodePath ChunkManagerPath { get; set; }
+    [Export] public NodePath TendrilControllerPath { get; set; }
+
+    // --- Spawn Config ---
+    [Export] public float SpawnCheckInterval = 2.0f;
+    [Export] public int MaxCreatures = 60;
+    [Export] public int SpawnRadius = 40;           // In terrain tiles
+    [Export] public int DespawnRadius = 80;          // In terrain tiles
+    [Export] public int MinSpawnDistance = 8;         // In terrain tiles
+
+    // --- Collision Config ---
+    /// <summary>Radius around tendril head for "head overlap" consumption checks (sub-cells).</summary>
+    [Export] public int HeadCollisionRadius = 5;
+
+    /// <summary>How long the damage flash lasts (seconds).</summary>
+    [Export] public float DamageFlashDuration = 0.12f;
+
+    // --- State ---
+    private ChunkManager _chunkManager;
+    private TendrilController _tendril;
+    private readonly List<Creature> _creatures = new();
+    private float _spawnTimer;
+    private readonly Random _rng = new();
+
+    // =========================================================================
+    //  LIFECYCLE
+    // =========================================================================
+
+    public override void _Ready()
+    {
+        if (ChunkManagerPath != null)
+            _chunkManager = GetNode<ChunkManager>(ChunkManagerPath);
+        if (TendrilControllerPath != null)
+            _tendril = GetNode<TendrilController>(TendrilControllerPath);
+
+        if (_chunkManager == null || _tendril == null)
+            GD.PrintErr("CreatureManager: Missing ChunkManager or TendrilController!");
+    }
+
+    public override void _Process(double delta)
+    {
+        if (_chunkManager == null || _tendril == null) return;
+        if (_tendril.IsRetreating || _tendril.IsRegenerating) return;
+
+        float dt = (float)delta;
+
+        // Spawn/despawn on timer
+        _spawnTimer -= dt;
+        if (_spawnTimer <= 0)
+        {
+            _spawnTimer = SpawnCheckInterval;
+            TrySpawnCreatures();
+            DespawnDistantCreatures();
+        }
+
+        // Update all creatures
+        for (int i = _creatures.Count - 1; i >= 0; i--)
+        {
+            var creature = _creatures[i];
+            if (!creature.IsAlive)
+            {
+                _creatures.RemoveAt(i);
+                continue;
+            }
+
+            // Tick damage flash
+            if (creature.DamageFlashTimer > 0)
+                creature.DamageFlashTimer -= dt;
+
+            UpdateCreatureAI(creature, dt);
+            CheckTendrilCollision(creature);
+        }
+    }
+
+    // =========================================================================
+    //  PUBLIC API (for CreatureRenderer, TendrilHarpoon, TendrilController)
+    // =========================================================================
+
+    /// <summary>Get all creatures (for rendering).</summary>
+    public List<Creature> GetAllCreatures() => _creatures;
+
+    /// <summary>Get all active, living creatures (convenience).</summary>
+    public IEnumerable<Creature> GetActiveCreatures()
+    {
+        foreach (var c in _creatures)
+        {
+            if (c.IsAlive && c.IsActive) yield return c;
+        }
+    }
+
+    /// <summary>
+    /// Find a creature whose body overlaps a specific sub-grid position.
+    /// Used by harpoon hit detection — replaces old GetCreatureAt(tileX, tileY).
+    /// </summary>
+    public Creature GetCreatureAtSubGrid(int subX, int subY)
+    {
+        foreach (var creature in _creatures)
+        {
+            if (!creature.IsAlive || !creature.IsActive) continue;
+
+            // Broad phase: bounding radius check
+            int dx = creature.SubX - subX;
+            int dy = creature.SubY - subY;
+            int r = creature.Body?.Radius ?? 4;
+            if (dx * dx + dy * dy > (r + 1) * (r + 1)) continue;
+
+            // Narrow phase: check body cells
+            if (creature.Body == null) continue;
+            foreach (var (cdx, cdy) in creature.Body.Cells)
+            {
+                if (creature.SubX + cdx == subX && creature.SubY + cdy == subY)
+                    return creature;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Find the nearest living, active creature within a radius of a sub-grid position.
+	/// Returns the creature's sub-grid position, or null if none found.
 	/// Used by TendrilController for auto-steering toward prey.
 	/// </summary>
-	public (int X, int Y)? GetNearestCreaturePosition(int centerX, int centerY, int radius)
+	public (int SubX, int SubY)? GetNearestCreatureSubPosition(int centerSubX, int centerSubY, int radiusSub)
 	{
-		int bestDistSq = radius * radius;
-		(int X, int Y)? best = null;
+		int bestDistSq = radiusSub * radiusSub;
+		(int, int)? best = null;
 
 		foreach (var creature in _creatures)
 		{
 			if (!creature.IsAlive || !creature.IsActive) continue;
 
-			int dx = creature.X - centerX;
-			int dy = creature.Y - centerY;
+			int dx = creature.SubX - centerSubX;
+			int dy = creature.SubY - centerSubY;
 			int distSq = dx * dx + dy * dy;
 
 			if (distSq < bestDistSq)
 			{
 				bestDistSq = distSq;
-				best = (creature.X, creature.Y);
+				best = (creature.SubX, creature.SubY);
 			}
 		}
 
 		return best;
 	}
 
-	// =========================================================================
-	//  TILE MANAGEMENT
-	// =========================================================================
-
 	/// <summary>
-	/// Place a creature's visual tile at its position.
-	/// Creatures are rendered as special tile types in the tileset.
+	/// Find the nearest creature object (not just position) for the harpoon to grab.
 	/// </summary>
-	private void PlaceCreatureTile(Creature creature)
+	public Creature GetNearestCreature(int subX, int subY, int radiusSub)
 	{
-		TileType tileType = GetCreatureTileType(creature.Species);
-		_chunkManager.SetTileAt(creature.X, creature.Y, tileType);
-	}
+		int bestDistSq = radiusSub * radiusSub;
+		Creature best = null;
 
-	private static TileType GetCreatureTileType(CreatureSpecies species)
-	{
-		return species switch
+		foreach (var creature in _creatures)
 		{
-			CreatureSpecies.Earthworm => TileType.CreatureEarthworm,
-			CreatureSpecies.Beetle => TileType.CreatureBeetle,
-			CreatureSpecies.Grub => TileType.CreatureGrub,
-			CreatureSpecies.MoleRat => TileType.CreatureMoleRat,
-			CreatureSpecies.RootBorer => TileType.CreatureRootBorer,
-			CreatureSpecies.FungusGnat => TileType.CreatureFungusGnat,
-			CreatureSpecies.CaveFish => TileType.CreatureCaveFish,
-			CreatureSpecies.BlindSalamander => TileType.CreatureBlindSalamander,
-			CreatureSpecies.CaveSpider => TileType.CreatureCaveSpider,
-			CreatureSpecies.BoneCrab => TileType.CreatureBoneCrab,
-			CreatureSpecies.WormColony => TileType.CreatureWormColony,
-			CreatureSpecies.MarrowLeech => TileType.CreatureMarrowLeech,
-			CreatureSpecies.MagmaBeetle => TileType.CreatureMagmaBeetle,
-			CreatureSpecies.TubeWorm => TileType.CreatureTubeWorm,
-			CreatureSpecies.MemorySlug => TileType.CreatureMemorySlug,
-			CreatureSpecies.FungalPredator => TileType.CreatureFungalPredator,
-			_ => TileType.CreatureEarthworm,
-		};
+			if (!creature.IsAlive || !creature.IsActive) continue;
+
+			int dx = creature.SubX - subX;
+			int dy = creature.SubY - subY;
+			int distSq = dx * dx + dy * dy;
+
+			if (distSq < bestDistSq)
+			{
+				bestDistSq = distSq;
+				best = creature;
+			}
+		}
+
+		return best;
+	}
+
+	/// <summary>Kill a creature from an external source (harpoon delivery).</summary>
+	public void KillCreatureExternal(Creature creature)
+	{
+		if (creature == null || !creature.IsAlive) return;
+		creature.IsAlive = false;
 	}
 
 	/// <summary>
-	/// Restore the tile that was at a creature's position before it was there.
+	/// Forcibly move a creature to a new sub-grid position (harpoon drag).
 	/// </summary>
-	private void RestoreCreatureTile(Creature creature)
+	public void ForceCreatureSubPosition(Creature creature, int newSubX, int newSubY)
 	{
-		_chunkManager.SetTileAt(creature.X, creature.Y, (TileType)creature.TileAtPosition);
+		if (creature == null || !creature.IsAlive) return;
+		creature.SubX = newSubX;
+		creature.SubY = newSubY;
+	}
+
+	/// <summary>
+	/// Apply a velocity impulse to a creature (knockback, slam, etc.).
+	/// The creature's normal AI will reassert after MoveTimer expires.
+    /// </summary>
+    public void ApplyImpulse(Creature creature, Vector2 impulse)
+    {
+        if (creature == null || !creature.IsAlive) return;
+        creature.Velocity = impulse;
+        creature.MoveAccumulator = Vector2.Zero;
+        creature.MoveTimer = 0.3f; // Override AI for a brief moment
+    }
+
+    /// <summary>
+    /// Deal damage to a creature. Returns true if the creature died.
+    /// Triggers damage flash.
+    /// </summary>
+    public bool DamageCreature(Creature creature, int damage)
+    {
+        if (creature == null || !creature.IsAlive) return false;
+
+        creature.Health -= damage;
+        creature.DamageFlashTimer = DamageFlashDuration;
+
+        if (creature.Health <= 0)
+        {
+            creature.IsAlive = false;
+            return true;
+        }
+        return false;
+    }
+
+    // =========================================================================
+    //  SPAWNING
+    // =========================================================================
+
+    private void TrySpawnCreatures()
+    {
+        if (_creatures.Count >= MaxCreatures) return;
+
+        int headTileX = _tendril.HeadX;
+        int headTileY = _tendril.HeadY;
+
+        BiomeType currentBiome = _chunkManager.GetBiomeAt(headTileX, headTileY);
+        var validSpecies = CreatureRegistry.GetForBiome(currentBiome);
+        if (validSpecies.Count == 0) return;
+
+        // Also pull in creatures from nearby biomes
+        BiomeType nearbyBiome = _chunkManager.GetBiomeAt(headTileX + 30, headTileY);
+        if (nearbyBiome != currentBiome)
+        {
+            var nearbySpecies = CreatureRegistry.GetForBiome(nearbyBiome);
+            foreach (var s in nearbySpecies)
+            {
+                if (_rng.Next(3) == 0)
+                    validSpecies.Add(s);
+            }
+        }
+
+        int toSpawn = 1 + _rng.Next(3);
+        for (int i = 0; i < toSpawn; i++)
+        {
+            if (_creatures.Count >= MaxCreatures) break;
+
+            var config = validSpecies[_rng.Next(validSpecies.Count)];
+
+            if (TryFindSpawnPosition(headTileX, headTileY, out int tileX, out int tileY))
+            {
+                SpawnCreature(config, tileX, tileY);
+            }
+        }
+    }
+
+    private bool TryFindSpawnPosition(int centerX, int centerY, out int x, out int y)
+    {
+        for (int attempt = 0; attempt < 15; attempt++)
+        {
+            x = centerX + _rng.Next(-SpawnRadius, SpawnRadius + 1);
+            y = centerY + _rng.Next(-SpawnRadius, SpawnRadius + 1);
+
+            int dx = x - _tendril.HeadX;
+            int dy = y - _tendril.HeadY;
+            if (dx * dx + dy * dy < MinSpawnDistance * MinSpawnDistance) continue;
+
+            TileType tile = _chunkManager.GetTileAt(x, y);
+            if (tile == TileType.Air) return true;
+            if (TileProperties.Is(tile, TileFlags.Organic) && !TileProperties.Is(tile, TileFlags.PlayerOwned))
+                return true;
+        }
+
+        x = 0; y = 0;
+        return false;
+    }
+
+    private void SpawnCreature(CreatureConfig config, int tileX, int tileY)
+    {
+        int scale = WorldConfig.SubGridScale;
+        int subX = tileX * scale + scale / 2;
+        int subY = tileY * scale + scale / 2;
+
+        var creature = new Creature
+        {
+            Species = config.Species,
+            SubX = subX,
+            SubY = subY,
+            Health = config.Health,
+            Behavior = config.Behavior,
+            MoveTimer = config.MoveSpeed * (0.5f + _rng.NextSingle()),
+            AttackCooldown = 0,
+            IsActive = config.Behavior != CreatureBehavior.Burrowed
+                    && config.Behavior != CreatureBehavior.Ambush,
+            IsAlive = true,
+            PatrolOriginSubX = subX,
+            PatrolOriginSubY = subY,
+            IsFleeing = false,
+            Velocity = Vector2.Zero,
+            MoveAccumulator = Vector2.Zero,
+            Body = CreatureBodyRegistry.GetDefaultBody(config.Species),
+            AnimTimeOffset = _rng.NextSingle() * 10f, // Desync animations
+            DamageFlashTimer = 0f,
+        };
+
+        _creatures.Add(creature);
+    }
+
+    private void DespawnDistantCreatures()
+    {
+        int headTileX = _tendril.HeadX;
+        int headTileY = _tendril.HeadY;
+
+        for (int i = _creatures.Count - 1; i >= 0; i--)
+        {
+            var c = _creatures[i];
+            int dx = c.TileX - headTileX;
+            int dy = c.TileY - headTileY;
+            if (dx * dx + dy * dy > DespawnRadius * DespawnRadius)
+            {
+                _creatures.RemoveAt(i);
+            }
+        }
+    }
+
+    // =========================================================================
+    //  AI UPDATE
+    // =========================================================================
+
+    private void UpdateCreatureAI(Creature creature, float dt)
+    {
+        var config = CreatureRegistry.GetConfig(creature.Species);
+
+        if (creature.AttackCooldown > 0)
+            creature.AttackCooldown -= dt;
+
+        int headSubX = _tendril.SubHeadX;
+        int headSubY = _tendril.SubHeadY;
+        float dx = headSubX - creature.SubX;
+        float dy = headSubY - creature.SubY;
+        float distSub = MathF.Sqrt(dx * dx + dy * dy);
+
+        // Convert detect/flee ranges to sub-grid units
+        int scale = WorldConfig.SubGridScale;
+        float detectRangeSub = config.DetectRange * scale;
+        float fleeRangeSub = config.FleeRange * scale;
+
+        switch (creature.Behavior)
+        {
+            case CreatureBehavior.Wander:
+                AIWander(creature, config, dt);
+                break;
+
+            case CreatureBehavior.Skittish:
+                if (distSub <= detectRangeSub)
+                {
+                    creature.IsFleeing = true;
+                    AIFlee(creature, config, headSubX, headSubY, dt);
+                }
+                else
+                {
+                    creature.IsFleeing = false;
+                    AIWander(creature, config, dt);
+                }
+                break;
+
+            case CreatureBehavior.Burrowed:
+                if (!creature.IsActive)
+                {
+                    if (distSub <= detectRangeSub)
+                    {
+                        creature.IsActive = true;
+                        creature.IsFleeing = true;
+                    }
+                }
+                else
+                {
+                    AIFlee(creature, config, headSubX, headSubY, dt);
+                    if (distSub > fleeRangeSub)
+                    {
+                        creature.IsActive = false;
+                        creature.IsFleeing = false;
+                    }
+                }
+                break;
+
+            case CreatureBehavior.Patrol:
+                if (distSub <= detectRangeSub)
+                {
+                    AIChase(creature, config, headSubX, headSubY, dt);
+                }
+                else
+                {
+                    // Patrol around origin
+                    float patrolDx = creature.SubX - creature.PatrolOriginSubX;
+                    float patrolDy = creature.SubY - creature.PatrolOriginSubY;
+                    float patrolDist = MathF.Sqrt(patrolDx * patrolDx + patrolDy * patrolDy);
+                    if (patrolDist > 10 * scale)
+                    {
+                        AIChase(creature, config, creature.PatrolOriginSubX, creature.PatrolOriginSubY, dt);
+                    }
+                    else
+                    {
+                        AIWander(creature, config, dt);
+                    }
+                }
+                break;
+
+            case CreatureBehavior.Ambush:
+                if (!creature.IsActive)
+                {
+                    if (distSub <= detectRangeSub)
+                    {
+                        creature.IsActive = true;
+                    }
+                }
+                else
+                {
+                    AIChase(creature, config, headSubX, headSubY, dt);
+
+                    // Give up if tendril gets very far
+                    if (distSub > detectRangeSub * 3)
+                    {
+                        creature.IsActive = false;
+                    }
+                }
+                break;
+
+            case CreatureBehavior.Grazer:
+                AIGrazer(creature, config, dt);
+                break;
+        }
+    }
+
+    // =========================================================================
+    //  AI BEHAVIORS
+    // =========================================================================
+
+    private void AIWander(Creature creature, CreatureConfig config, float dt)
+    {
+        creature.MoveTimer -= dt;
+        if (creature.MoveTimer <= 0)
+        {
+            // Pick a new random direction
+            float angle = _rng.NextSingle() * MathF.Tau;
+            creature.Velocity = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * config.SubGridSpeed;
+            creature.MoveTimer = 0.5f + _rng.NextSingle() * 2.0f;
+        }
+
+        StepCreature(creature, dt);
+    }
+
+    private void AIFlee(Creature creature, CreatureConfig config,
+                        int threatSubX, int threatSubY, float dt)
+    {
+        float fdx = creature.SubX - threatSubX;
+        float fdy = creature.SubY - threatSubY;
+        float dist = MathF.Sqrt(fdx * fdx + fdy * fdy);
+
+        if (dist > 0.01f)
+        {
+            Vector2 away = new Vector2(fdx, fdy) / dist;
+
+			// Add jitter so flee path isn't a perfect straight line
+			float jitter = (_rng.NextSingle() - 0.5f) * 0.5f;
+			away = away.Rotated(jitter);
+
+			float speed = config.SubGridSpeed * config.AlertSpeedMultiplier;
+			creature.Velocity = away * speed;
+		}
+
+		StepCreature(creature, dt);
+	}
+
+	private void AIChase(Creature creature, CreatureConfig config,
+						 int targetSubX, int targetSubY, float dt)
+	{
+		float cdx = targetSubX - creature.SubX;
+		float cdy = targetSubY - creature.SubY;
+		float dist = MathF.Sqrt(cdx * cdx + cdy * cdy);
+
+		if (dist > 0.01f)
+		{
+			Vector2 toward = new Vector2(cdx, cdy) / dist;
+			float speed = config.SubGridSpeed * config.AlertSpeedMultiplier;
+			creature.Velocity = toward * speed;
+		}
+
+		StepCreature(creature, dt);
+	}
+
+	private void AIGrazer(Creature creature, CreatureConfig config, float dt)
+	{
+		// Eat sub-grid cells under and around the creature
+		SubGridData subGrid = _tendril.SubGrid;
+		int eatRadius = (creature.Body?.Radius ?? 2) + 1;
+
+		bool ateAnything = false;
+		for (int edy = -eatRadius; edy <= eatRadius; edy++)
+		{
+			for (int edx = -eatRadius; edx <= eatRadius; edx++)
+			{
+				int sx = creature.SubX + edx;
+				int sy = creature.SubY + edy;
+				if (subGrid.HasCell(sx, sy))
+				{
+					var cell = subGrid.GetCell(sx, sy);
+					// Don't eat the tendril head (Core/Fresh) — only Trail/Root
+                    if (cell.State == SubCellState.Trail || cell.State == SubCellState.Root)
+                    {
+                        subGrid.ClearCell(sx, sy);
+                        ateAnything = true;
+                    }
+                }
+            }
+        }
+
+        // Also unclaim terrain tile if all sub-cells cleared
+        if (ateAnything)
+        {
+            var (tileX, tileY) = SubGridData.SubToTerrain(creature.SubX, creature.SubY);
+            if (!subGrid.HasCellsInTerrainTile(tileX, tileY))
+            {
+                _tendril.ClaimedTiles.Remove(TendrilController.PackCoords(tileX, tileY));
+            }
+        }
+
+        // Move toward nearest tendril territory
+        (int, int)? nearestTerritory = FindNearestTendrilCell(creature.SubX, creature.SubY, 20);
+        if (nearestTerritory.HasValue)
+        {
+            float gdx = nearestTerritory.Value.Item1 - creature.SubX;
+            float gdy = nearestTerritory.Value.Item2 - creature.SubY;
+            float dist = MathF.Sqrt(gdx * gdx + gdy * gdy);
+            if (dist > 0.01f)
+            {
+                creature.Velocity = new Vector2(gdx, gdy) / dist * config.SubGridSpeed;
+            }
+        }
+        else
+        {
+            AIWander(creature, config, dt);
+            return;
+        }
+
+        StepCreature(creature, dt);
+    }
+
+    /// <summary>
+    /// Find the nearest tendril sub-cell within a search radius.
+    /// Used by grazers to seek mycelium.
+    /// </summary>
+    private (int, int)? FindNearestTendrilCell(int subX, int subY, int radius)
+    {
+        SubGridData subGrid = _tendril.SubGrid;
+        int bestDistSq = radius * radius;
+        (int, int)? best = null;
+
+        // Spiral outward — check increasing rings
+        for (int r = 1; r <= radius; r++)
+        {
+            for (int d = -r; d <= r; d++)
+            {
+                // Check 4 edges of the ring
+                CheckTendrilCell(subGrid, subX + d, subY - r, subX, subY, ref bestDistSq, ref best);
+                CheckTendrilCell(subGrid, subX + d, subY + r, subX, subY, ref bestDistSq, ref best);
+                CheckTendrilCell(subGrid, subX - r, subY + d, subX, subY, ref bestDistSq, ref best);
+                CheckTendrilCell(subGrid, subX + r, subY + d, subX, subY, ref bestDistSq, ref best);
+            }
+
+            // If we found something in this ring, no need to search further
+            if (best.HasValue) return best;
+        }
+
+        return best;
+    }
+
+    private static void CheckTendrilCell(SubGridData subGrid, int sx, int sy,
+        int originX, int originY, ref int bestDistSq, ref (int, int)? best)
+    {
+        if (!subGrid.HasCell(sx, sy)) return;
+        var cell = subGrid.GetCell(sx, sy);
+        if (cell.State != SubCellState.Trail && cell.State != SubCellState.Root) return;
+
+        int dx = sx - originX;
+        int dy = sy - originY;
+        int distSq = dx * dx + dy * dy;
+        if (distSq < bestDistSq)
+        {
+            bestDistSq = distSq;
+            best = (sx, sy);
+        }
+    }
+
+    // =========================================================================
+    //  SUB-GRID MOVEMENT
+    // =========================================================================
+
+    /// <summary>
+    /// Step a creature through sub-grid coordinates using its current velocity.
+    /// Same accumulator pattern as the tendril — smooth 4px steps.
+    /// Includes terrain collision and creature-creature avoidance.
+    /// </summary>
+    private void StepCreature(Creature creature, float dt)
+    {
+        creature.MoveAccumulator += creature.Velocity * dt;
+
+        int iterations = 0;
+        while ((MathF.Abs(creature.MoveAccumulator.X) >= 1f
+            || MathF.Abs(creature.MoveAccumulator.Y) >= 1f) && iterations < 8)
+        {
+            iterations++;
+
+            int stepX = MathF.Abs(creature.MoveAccumulator.X) >= 1f
+                ? Math.Sign(creature.MoveAccumulator.X) : 0;
+            int stepY = MathF.Abs(creature.MoveAccumulator.Y) >= 1f
+                ? Math.Sign(creature.MoveAccumulator.Y) : 0;
+
+            int newSubX = creature.SubX + stepX;
+            int newSubY = creature.SubY + stepY;
+
+            // Try full diagonal step first
+            if (!CanCreatureOccupy(creature, newSubX, newSubY))
+            {
+                // Try sliding along X
+                if (stepX != 0 && CanCreatureOccupy(creature, creature.SubX + stepX, creature.SubY))
+                {
+                    newSubX = creature.SubX + stepX;
+                    newSubY = creature.SubY;
+                    stepY = 0;
+                }
+                // Try sliding along Y
+                else if (stepY != 0 && CanCreatureOccupy(creature, creature.SubX, creature.SubY + stepY))
+                {
+                    newSubX = creature.SubX;
+                    newSubY = creature.SubY + stepY;
+                    stepX = 0;
+                }
+                else
+                {
+                    // Fully blocked — zero out and stop
+                    creature.MoveAccumulator = Vector2.Zero;
+                    creature.Velocity = Vector2.Zero;
+                    break;
+                }
+            }
+
+            if (stepX != 0) creature.MoveAccumulator -= new Vector2(stepX, 0);
+            if (stepY != 0) creature.MoveAccumulator -= new Vector2(0, stepY);
+
+            creature.SubX = newSubX;
+            creature.SubY = newSubY;
+        }
+    }
+
+    /// <summary>
+	/// Check if ALL cells of a creature's body can exist at a given sub-grid position.
+	/// Checks terrain passability per-cell and basic creature-creature avoidance.
+	/// </summary>
+	private bool CanCreatureOccupy(Creature creature, int subX, int subY)
+	{
+		var body = creature.Body;
+		if (body == null) return true;
+
+		// Check terrain for each body cell
+		foreach (var (dx, dy) in body.Cells)
+		{
+			int cellSubX = subX + dx;
+			int cellSubY = subY + dy;
+
+			var (terrainX, terrainY) = SubGridData.SubToTerrain(cellSubX, cellSubY);
+			TileType tile = _chunkManager.GetTileAt(terrainX, terrainY);
+
+			if (tile == TileType.Air) continue;
+			if (TileProperties.Is(tile, TileFlags.Organic)) continue;
+			if (TileProperties.Is(tile, TileFlags.PlayerOwned)) continue;
+
+			// Blocked by solid non-organic terrain
+			return false;
+		}
+
+		// Basic creature-creature avoidance (broad phase only — keeps them from stacking)
+		int selfRadius = body.Radius;
+		foreach (var other in _creatures)
+		{
+			if (other == creature || !other.IsAlive || !other.IsActive) continue;
+
+			int odx = subX - other.SubX;
+			int ody = subY - other.SubY;
+			int minDist = selfRadius + (other.Body?.Radius ?? 2);
+
+			if (odx * odx + ody * ody < minDist * minDist)
+				return false;
+		}
+
+		return true;
+	}
+
+	// =========================================================================
+	//  TENDRIL COLLISION
+	// =========================================================================
+
+	/// <summary>
+	/// Check if a creature overlaps the tendril head and resolve the interaction.
+	/// Uses pixel-perfect sub-cell collision against the tendril's core blob.
+    /// </summary>
+    private void CheckTendrilCollision(Creature creature)
+    {
+        if (!creature.IsAlive || !creature.IsActive) return;
+
+        // Broad phase: is the creature even close to the tendril head?
+        int headSubX = _tendril.SubHeadX;
+        int headSubY = _tendril.SubHeadY;
+        int bodyRadius = creature.Body?.Radius ?? 3;
+        int checkDist = bodyRadius + HeadCollisionRadius;
+
+        int hdx = creature.SubX - headSubX;
+        int hdy = creature.SubY - headSubY;
+        if (hdx * hdx + hdy * hdy > checkDist * checkDist) return;
+
+        // Narrow phase: does any creature body cell overlap a tendril core/fresh cell?
+        bool overlaps = CreatureOverlapsTendrilHead(creature, headSubX, headSubY);
+        if (!overlaps) return;
+
+        var config = CreatureRegistry.GetConfig(creature.Species);
+        bool isThreat = config.DamageOnHit > 0;
+
+        if (isThreat)
+        {
+            if (creature.AttackCooldown <= 0)
+            {
+                _tendril.DrainHunger(config.DamageOnHit);
+                creature.AttackCooldown = config.HitCooldown;
+                creature.DamageFlashTimer = DamageFlashDuration;
+
+                creature.Health--;
+                if (creature.Health <= 0)
+                {
+                    _tendril.AddHunger(config.HungerOnConsume);
+                    creature.IsAlive = false;
+                    GD.Print($"Killed {creature.Species}! +{config.HungerOnConsume} hunger");
+                }
+                else
+                {
+                    // Knockback: push creature away from tendril head
+                    if (hdx * hdx + hdy * hdy > 0)
+                    {
+                        Vector2 knockback = new Vector2(hdx, hdy).Normalized() * 40f;
+                        ApplyImpulse(creature, knockback);
+                    }
+
+                    GD.Print($"{creature.Species} hit you! -{config.DamageOnHit} hunger. HP: {creature.Health}");
+                }
+            }
+        }
+        else
+        {
+            // Prey — consumed on contact
+            _tendril.AddHunger(config.HungerOnConsume);
+            creature.IsAlive = false;
+            GD.Print($"Consumed {creature.Species}! +{config.HungerOnConsume} hunger");
+        }
+    }
+
+    /// <summary>
+    /// Pixel-perfect check: does any creature body cell overlap the tendril head area?
+    /// Checks against actual sub-grid cells (Core and Fresh states = the head blob).
+    /// </summary>
+    private bool CreatureOverlapsTendrilHead(Creature creature, int headSubX, int headSubY)
+    {
+        var body = creature.Body;
+        if (body == null) return false;
+
+        SubGridData subGrid = _tendril.SubGrid;
+
+        foreach (var (dx, dy) in body.Cells)
+        {
+            int cellX = creature.SubX + dx;
+            int cellY = creature.SubY + dy;
+
+            // Check if this cell is within the tendril head radius
+            int hdx = cellX - headSubX;
+            int hdy = cellY - headSubY;
+            if (hdx * hdx + hdy * hdy > HeadCollisionRadius * HeadCollisionRadius) continue;
+
+			// Check if there's actually a tendril cell here (Core or Fresh = the active head)
+			if (subGrid.HasCell(cellX, cellY))
+			{
+				var cell = subGrid.GetCell(cellX, cellY);
+				if (cell.State == SubCellState.Core || cell.State == SubCellState.Fresh)
+					return true;
+			}
+		}
+
+		return false;
+	}
+
+	/// <summary>
+	/// Check if any of a creature's body cells overlap any tendril sub-cell.
+    /// Used for territory overlap checks (grazers, passive effects).
+    /// More expensive than head-only check but needed for some behaviors.
+    /// </summary>
+    public bool CreatureOverlapsTendrilTerritory(Creature creature)
+    {
+        if (creature.Body == null) return false;
+
+        SubGridData subGrid = _tendril.SubGrid;
+
+        foreach (var (dx, dy) in creature.Body.Cells)
+        {
+            if (subGrid.HasCell(creature.SubX + dx, creature.SubY + dy))
+                return true;
+        }
+
+        return false;
+    }
+
+    // =========================================================================
+    //  BACKWARD COMPAT (bridge methods during migration)
+    // =========================================================================
+
+    /// <summary>
+    /// Find the nearest creature position in TERRAIN-TILE coords.
+	/// Bridge for TendrilController auto-steer until it's updated to use sub-grid.
+	/// </summary>
+	public (int X, int Y)? GetNearestCreaturePosition(int centerTileX, int centerTileY, int radiusTiles)
+	{
+		int scale = WorldConfig.SubGridScale;
+		var result = GetNearestCreatureSubPosition(
+			centerTileX * scale + scale / 2,
+			centerTileY * scale + scale / 2,
+			radiusTiles * scale);
+
+		if (result.HasValue)
+		{
+			var (subX, subY) = result.Value;
+			return SubGridData.SubToTerrain(subX, subY);
+		}
+		return null;
+	}
+
+	/// <summary>
+	/// Find a creature at terrain-tile coords (old API).
+	/// Bridge for systems not yet updated.
+	/// </summary>
+	public Creature GetCreatureAt(int worldX, int worldY)
+	{
+		int scale = WorldConfig.SubGridScale;
+		// Check all sub-cells within this terrain tile
+		for (int dy = 0; dy < scale; dy++)
+		{
+			for (int dx = 0; dx < scale; dx++)
+			{
+				var creature = GetCreatureAtSubGrid(worldX * scale + dx, worldY * scale + dy);
+				if (creature != null) return creature;
+			}
+		}
+		return null;
 	}
 }

@@ -22,6 +22,11 @@ using Mycorrhiza.Data;
 /// Both modes: harpoon traces through air on the sub-grid using DDA.
 /// Grabs the first creature it hits and drags it back on retract.
 ///
+/// SUB-GRID CREATURE MIGRATION:
+///   Creature detection now checks every sub-cell step (not just tile crossings).
+///   Drag uses ForceCreatureSubPosition instead of terrain-tile coords.
+///   Retract checks for creature-to-creature slam collisions.
+///
 /// SETUP:
 ///   - Add as sibling Node of TendrilController
 ///   - Assign TendrilControllerPath, ChunkManagerPath, CreatureManagerPath
@@ -50,7 +55,8 @@ public partial class TendrilHarpoon : Node
 	[Export] public float GuidedTurnRate = 4.5f;
 
 	// --- Shape ---
-	/// <summary>Radius of the harpoon tendril in sub-cells. 0 = single pixel, 2 = wormy, 3+ = fat.</summary>
+	/// <summary>Radius of the harpoon tendril in sub-cells.
+	/// 0 = single pixel, 2 = wormy, 3+ = fat.</summary>
 	[Export(PropertyHint.Range, "0,6,1")] public int HarpoonThickness = 2;
 	/// <summary>How much the edge wobbles (0 = perfect circle, higher = more organic).</summary>
 	[Export(PropertyHint.Range, "0,2,0.1")] public float ShapeIrregularity = 0.8f;
@@ -62,6 +68,16 @@ public partial class TendrilHarpoon : Node
 	[Export] public int CaveDetectRadius = 3;
 	[Export] public float TriggerDeadZone = 0.3f;
 	[Export] public float StickDeadZone = 0.22f;
+
+	// --- Slam Config ---
+	/// <summary>Damage dealt to a stationary creature when slammed by a dragged creature.</summary>
+	[Export] public int SlamDamageToTarget = 2;
+
+	/// <summary>Damage dealt to the dragged creature on slam impact.</summary>
+	[Export] public int SlamDamageToProjectile = 1;
+
+	/// <summary>Knockback speed applied to the stationary creature on slam.</summary>
+	[Export] public float SlamKnockbackForce = 60f;
 
 	// --- State Machine ---
 	private enum HarpoonState
@@ -108,6 +124,7 @@ public partial class TendrilHarpoon : Node
 	[Signal] public delegate void HarpoonFiredEventHandler(int range);
 	[Signal] public delegate void CreatureGrabbedEventHandler(int creatureX, int creatureY);
 	[Signal] public delegate void HarpoonRetractedEventHandler(bool caughtSomething);
+	[Signal] public delegate void CreatureSlammedEventHandler(int targetSubX, int targetSubY);
 
 	/// <summary>True when the harpoon is doing anything (TendrilController checks this to freeze).</summary>
 	public bool IsActive => _state != HarpoonState.Idle;
@@ -303,6 +320,7 @@ public partial class TendrilHarpoon : Node
 
 	// =========================================================================
 	//  DDA STEP — shared by both modes
+	//  CHANGED: Creature detection now uses sub-grid (every step, not just tile crossings)
 	// =========================================================================
 
 	private bool ExtendOneStep()
@@ -319,7 +337,21 @@ public partial class TendrilHarpoon : Node
 		_currentSubX = newSubX;
 		_currentSubY = newSubY;
 
-		// Check terrain when crossing tile boundaries
+		// --- CREATURE HIT CHECK (every sub-step, pixel-perfect) ---
+		// This runs BEFORE the terrain check so we can grab creatures
+		// even if they're standing at the edge of a cave.
+		Creature hitCreature = _creatureManager?.GetCreatureAtSubGrid(newSubX, newSubY);
+		if (hitCreature != null)
+		{
+			PlaceHarpoonCell(newSubX, newSubY);
+			_grabbedCreature = hitCreature;
+			GD.Print($"Harpoon grabbed {hitCreature.Species} at sub ({newSubX},{newSubY})!");
+			EmitSignal(SignalName.CreatureGrabbed, hitCreature.SubX, hitCreature.SubY);
+			StartRetract();
+			return false;
+		}
+
+		// --- TERRAIN CHECK (only on tile boundary crossings) ---
 		var (terrainX, terrainY) = SubGridData.SubToTerrain(newSubX, newSubY);
 		bool newTerrainTile = (terrainX != _lastCheckedTerrainX || terrainY != _lastCheckedTerrainY);
 
@@ -327,18 +359,6 @@ public partial class TendrilHarpoon : Node
 		{
 			_lastCheckedTerrainX = terrainX;
 			_lastCheckedTerrainY = terrainY;
-
-			// Creature hit?
-			Creature hitCreature = _creatureManager?.GetCreatureAt(terrainX, terrainY);
-			if (hitCreature != null)
-			{
-				PlaceHarpoonCell(newSubX, newSubY);
-				_grabbedCreature = hitCreature;
-				GD.Print($"Harpoon grabbed {hitCreature.Species} at ({terrainX},{terrainY})!");
-				EmitSignal(SignalName.CreatureGrabbed, terrainX, terrainY);
-				StartRetract();
-				return false;
-			}
 
 			// Wall hit? (harpoon only travels through air)
 			TileType tile = _chunkManager.GetTileAt(terrainX, terrainY);
@@ -407,7 +427,8 @@ public partial class TendrilHarpoon : Node
 	}
 
 	/// <summary>
-	/// Clear the blob footprint at a path point. Must match PlaceHarpoonCell radius.
+	/// Clear the blob footprint at a path point.
+	/// Must match PlaceHarpoonCell radius.
 	/// </summary>
 	private void ClearHarpoonCell(int subX, int subY)
 	{
@@ -431,6 +452,7 @@ public partial class TendrilHarpoon : Node
 
 	// =========================================================================
 	//  RETRACTING
+	//  CHANGED: Drag uses sub-grid coords. Checks for creature-creature slam.
 	// =========================================================================
 
 	private void StartRetract()
@@ -457,12 +479,82 @@ public partial class TendrilHarpoon : Node
 			_harpoonPath.RemoveAt(_harpoonPath.Count - 1);
 			ClearHarpoonCell(rx, ry);
 
-			// Drag creature along
+			// Drag creature along using sub-grid coordinates
 			if (_grabbedCreature != null && _grabbedCreature.IsAlive && _harpoonPath.Count > 0)
 			{
 				var (tipSubX, tipSubY) = _harpoonPath[^1];
-				var (tx, ty) = SubGridData.SubToTerrain(tipSubX, tipSubY);
-				_creatureManager?.ForceCreaturePosition(_grabbedCreature, tx, ty);
+
+				// Move the grabbed creature to the harpoon tip position (sub-grid)
+				_creatureManager?.ForceCreatureSubPosition(_grabbedCreature, tipSubX, tipSubY);
+
+				// Check for creature-creature slam collision
+				CheckSlamCollision(tipSubX, tipSubY);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Check if the dragged creature has collided with another creature during retract.
+	/// If so, deal damage to both and knock the stationary one away.
+	/// </summary>
+	private void CheckSlamCollision(int projectileSubX, int projectileSubY)
+	{
+		if (_grabbedCreature == null || !_grabbedCreature.IsAlive) return;
+		if (_creatureManager == null) return;
+
+		int projectileRadius = _grabbedCreature.Body?.Radius ?? 3;
+
+		foreach (var other in _creatureManager.GetActiveCreatures())
+		{
+			if (other == _grabbedCreature) continue;
+
+			int otherRadius = other.Body?.Radius ?? 3;
+			int minDist = projectileRadius + otherRadius;
+
+			int sdx = projectileSubX - other.SubX;
+			int sdy = projectileSubY - other.SubY;
+
+			if (sdx * sdx + sdy * sdy > minDist * minDist) continue;
+
+			// SLAM! Damage both creatures
+			bool targetDied = _creatureManager.DamageCreature(other, SlamDamageToTarget);
+			bool projectileDied = _creatureManager.DamageCreature(_grabbedCreature, SlamDamageToProjectile);
+
+			// Knockback the stationary creature away from the impact
+			if (other.IsAlive)
+			{
+				float dist = Mathf.Sqrt(sdx * sdx + sdy * sdy);
+				Vector2 knockDir;
+				if (dist > 0.01f)
+					knockDir = new Vector2(sdx, sdy) / dist;
+				else
+					knockDir = new Vector2(0, -1); // Default up if perfectly overlapping
+
+				_creatureManager.ApplyImpulse(other, knockDir * -SlamKnockbackForce);
+			}
+
+			// Grant hunger for kills
+			if (targetDied)
+			{
+				var config = CreatureRegistry.GetConfig(other.Species);
+				_tendril.AddHunger(config.HungerOnConsume);
+				GD.Print($"SLAM! {_grabbedCreature.Species} killed {other.Species}! +{config.HungerOnConsume} hunger");
+			}
+			else
+			{
+				GD.Print($"SLAM! {_grabbedCreature.Species} hit {other.Species}!");
+			}
+
+			EmitSignal(SignalName.CreatureSlammed, other.SubX, other.SubY);
+
+			// If the projectile died from the impact, drop it
+			if (projectileDied)
+			{
+				var projConfig = CreatureRegistry.GetConfig(_grabbedCreature.Species);
+				_tendril.AddHunger(projConfig.HungerOnConsume);
+				_grabbedCreature = null;
+				GD.Print("Projectile creature died from slam impact!");
+				return;
 			}
 		}
 	}

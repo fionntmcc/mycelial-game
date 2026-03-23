@@ -65,7 +65,7 @@ public readonly struct CreatureConfig
 {
     public readonly CreatureSpecies Species;
     public readonly CreatureBehavior Behavior;
-    public readonly float MoveSpeed;       // Seconds between moves (lower = faster)
+    public readonly float MoveSpeed;       // Seconds between AI direction changes (tick rate)
     public readonly int DetectRange;       // Tiles — how far it can "see" the tendril
     public readonly int FleeRange;         // Tiles — how far it runs before stopping
     public readonly float HungerOnConsume; // Hunger gained by tendril when consumed
@@ -74,11 +74,25 @@ public readonly struct CreatureConfig
     public readonly int Health;            // Hits to kill (for tough creatures)
     public readonly BiomeType[] Biomes;    // Which biomes this creature spawns in
 
+    /// <summary>
+    /// Movement speed in sub-cells per second.
+    /// For reference, the tendril moves ~30–50 sub-cells/sec at full speed.
+    /// </summary>
+    public readonly float SubGridSpeed;
+
+    /// <summary>
+    /// Speed multiplier when fleeing (skittish) or charging (ambush).
+    /// Applied on top of SubGridSpeed during those behaviors.
+    /// </summary>
+    public readonly float AlertSpeedMultiplier;
+
     public CreatureConfig(
         CreatureSpecies species, CreatureBehavior behavior,
         float moveSpeed, int detectRange, int fleeRange,
         float hungerOnConsume, float damageOnHit, float hitCooldown,
-        int health, params BiomeType[] biomes)
+        int health,
+        float subGridSpeed, float alertSpeedMultiplier,
+        params BiomeType[] biomes)
     {
         Species = species;
         Behavior = behavior;
@@ -89,6 +103,8 @@ public readonly struct CreatureConfig
         DamageOnHit = damageOnHit;
         HitCooldown = hitCooldown;
         Health = health;
+        SubGridSpeed = subGridSpeed;
+        AlertSpeedMultiplier = alertSpeedMultiplier;
         Biomes = biomes;
     }
 }
@@ -101,97 +117,124 @@ public static class CreatureRegistry
     public static readonly CreatureConfig[] All = new CreatureConfig[]
     {
         // ====== PREY ======
+        //                                                                               subSpeed  alertMul
 
         // Earthworm — slow, dumb, everywhere. Your bread and butter.
         new(CreatureSpecies.Earthworm, CreatureBehavior.Wander,
-            moveSpeed: 0.8f, detectRange: 0, fleeRange: 0,
-            hungerOnConsume: 8f, damageOnHit: 0, hitCooldown: 0, health: 1,
-            BiomeType.Neutral, BiomeType.Topsoil, BiomeType.RootMaze),
+            moveSpeed: 1.2f, detectRange: 0, fleeRange: 0,
+            hungerOnConsume: 8f, damageOnHit: 0f, hitCooldown: 0f, health: 1,
+            subGridSpeed: 8f, alertSpeedMultiplier: 1f,
+            BiomeType.Topsoil, BiomeType.Neutral, BiomeType.RootMaze),
 
-        // Beetle — skittish, worth chasing
+        // Beetle — skittish, medium speed. Worth chasing.
         new(CreatureSpecies.Beetle, CreatureBehavior.Skittish,
-            moveSpeed: 0.3f, detectRange: 6, fleeRange: 12,
-            hungerOnConsume: 12f, damageOnHit: 0, hitCooldown: 0, health: 1,
-            BiomeType.Neutral, BiomeType.Topsoil, BiomeType.RootMaze),
+            moveSpeed: 0.8f, detectRange: 6, fleeRange: 15,
+            hungerOnConsume: 12f, damageOnHit: 0f, hitCooldown: 0f, health: 1,
+            subGridSpeed: 22f, alertSpeedMultiplier: 1.4f,
+            BiomeType.Topsoil, BiomeType.Neutral),
 
-        // Grub — sits still in soil, pops out when you get close, runs
+        // Grub — burrowed. Stationary until disturbed, then flees.
         new(CreatureSpecies.Grub, CreatureBehavior.Burrowed,
-            moveSpeed: 0.5f, detectRange: 3, fleeRange: 8,
-            hungerOnConsume: 15f, damageOnHit: 0, hitCooldown: 0, health: 1,
-            BiomeType.Topsoil, BiomeType.RootMaze),
+            moveSpeed: 0.6f, detectRange: 3, fleeRange: 10,
+            hungerOnConsume: 15f, damageOnHit: 0f, hitCooldown: 0f, health: 1,
+            subGridSpeed: 5f, alertSpeedMultiplier: 2.0f,
+            BiomeType.Topsoil, BiomeType.Neutral, BiomeType.RootMaze),
 
-        // Mole Rat — fast, high value. The prize catch of early game.
+        // ====== ROOT MAZE ======
+
+        // Mole Rat — fast, high reward.
         new(CreatureSpecies.MoleRat, CreatureBehavior.Skittish,
-            moveSpeed: 0.15f, detectRange: 8, fleeRange: 20,
-            hungerOnConsume: 25f, damageOnHit: 0, hitCooldown: 0, health: 1,
-            BiomeType.RootMaze, BiomeType.Topsoil),
-
-        // Root Borer — wanders, eats roots (opens paths)
-        new(CreatureSpecies.RootBorer, CreatureBehavior.Wander,
-            moveSpeed: 0.6f, detectRange: 0, fleeRange: 0,
-            hungerOnConsume: 10f, damageOnHit: 0, hitCooldown: 0, health: 1,
+            moveSpeed: 0.5f, detectRange: 8, fleeRange: 20,
+            hungerOnConsume: 20f, damageOnHit: 0f, hitCooldown: 0f, health: 1,
+            subGridSpeed: 35f, alertSpeedMultiplier: 1.3f,
             BiomeType.RootMaze),
 
-        // Cave Fish — wanders near water. Decent gain.
+        // Root Borer — wanders, opens paths through roots.
+        new(CreatureSpecies.RootBorer, CreatureBehavior.Wander,
+            moveSpeed: 1.0f, detectRange: 0, fleeRange: 0,
+            hungerOnConsume: 10f, damageOnHit: 0f, hitCooldown: 0f, health: 2,
+            subGridSpeed: 12f, alertSpeedMultiplier: 1f,
+            BiomeType.RootMaze),
+
+        // Fungus Gnat — grazer pest. Eats your mycelium.
+        new(CreatureSpecies.FungusGnat, CreatureBehavior.Grazer,
+            moveSpeed: 0.4f, detectRange: 10, fleeRange: 0,
+            hungerOnConsume: 6f, damageOnHit: 0f, hitCooldown: 0f, health: 1,
+            subGridSpeed: 18f, alertSpeedMultiplier: 1f,
+            BiomeType.Topsoil, BiomeType.RootMaze),
+
+        // ====== WET DARK ======
+
+        // Cave Fish — wanders in water-adjacent areas.
         new(CreatureSpecies.CaveFish, CreatureBehavior.Wander,
-            moveSpeed: 0.4f, detectRange: 0, fleeRange: 0,
-            hungerOnConsume: 14f, damageOnHit: 0, hitCooldown: 0, health: 1,
+            moveSpeed: 0.7f, detectRange: 0, fleeRange: 0,
+            hungerOnConsume: 14f, damageOnHit: 0f, hitCooldown: 0f, health: 1,
+            subGridSpeed: 16f, alertSpeedMultiplier: 1f,
             BiomeType.WetDark),
 
-        // Blind Salamander — rare, skittish, high value
+        // Blind Salamander — rare, high reward, skittish.
         new(CreatureSpecies.BlindSalamander, CreatureBehavior.Skittish,
-            moveSpeed: 0.25f, detectRange: 5, fleeRange: 15,
-            hungerOnConsume: 30f, damageOnHit: 0, hitCooldown: 0, health: 1,
+            moveSpeed: 0.6f, detectRange: 5, fleeRange: 18,
+            hungerOnConsume: 25f, damageOnHit: 0f, hitCooldown: 0f, health: 1,
+            subGridSpeed: 28f, alertSpeedMultiplier: 1.5f,
             BiomeType.WetDark),
-
-        // Memory Slug — slow, wandering, lore creature. Massive hunger.
-        new(CreatureSpecies.MemorySlug, CreatureBehavior.Wander,
-            moveSpeed: 1.2f, detectRange: 0, fleeRange: 0,
-            hungerOnConsume: 50f, damageOnHit: 0, hitCooldown: 0, health: 1,
-            BiomeType.MycelialGraveyard),
 
         // ====== THREATS ======
 
-        // Fungus Gnat — grazer. Eats your mycelium. Annoying pest.
-        new(CreatureSpecies.FungusGnat, CreatureBehavior.Grazer,
-            moveSpeed: 0.4f, detectRange: 15, fleeRange: 0,
-            hungerOnConsume: 6f, damageOnHit: 2f, hitCooldown: 1.5f, health: 1,
-            BiomeType.RootMaze, BiomeType.Topsoil),
-
-        // Cave Spider — ambush predator. Hides until you're close, then strikes.
+        // Cave Spider — ambush predator. Hides, leaps, hurts.
         new(CreatureSpecies.CaveSpider, CreatureBehavior.Ambush,
-            moveSpeed: 0.12f, detectRange: 5, fleeRange: 0,
-            hungerOnConsume: 18f, damageOnHit: 8f, hitCooldown: 2.0f, health: 2,
+            moveSpeed: 0.3f, detectRange: 6, fleeRange: 0,
+            hungerOnConsume: 18f, damageOnHit: 8f, hitCooldown: 1.5f, health: 2,
+            subGridSpeed: 45f, alertSpeedMultiplier: 1.6f,
             BiomeType.WetDark, BiomeType.RootMaze),
 
-        // Bone Crab — patrols cave edges. Armored. Hurts a lot.
+        // Bone Crab — patrol. Armored. Drains hunger hard.
         new(CreatureSpecies.BoneCrab, CreatureBehavior.Patrol,
-            moveSpeed: 0.35f, detectRange: 7, fleeRange: 0,
-            hungerOnConsume: 20f, damageOnHit: 12f, hitCooldown: 2.5f, health: 3,
+            moveSpeed: 0.5f, detectRange: 7, fleeRange: 0,
+            hungerOnConsume: 30f, damageOnHit: 12f, hitCooldown: 2.0f, health: 3,
+            subGridSpeed: 20f, alertSpeedMultiplier: 1.3f,
             BiomeType.BoneStrata),
 
         // Worm Colony — ambush swarm. Very dangerous. High reward.
         new(CreatureSpecies.WormColony, CreatureBehavior.Ambush,
-            moveSpeed: 0.2f, detectRange: 4, fleeRange: 0,
+            moveSpeed: 0.3f, detectRange: 5, fleeRange: 0,
             hungerOnConsume: 35f, damageOnHit: 15f, hitCooldown: 1.0f, health: 4,
+            subGridSpeed: 30f, alertSpeedMultiplier: 1.4f,
             BiomeType.BoneStrata),
 
-        // Marrow Leech — seeks mycelium and drains it
+        // Marrow Leech — wanders toward mycelium. Passive hunger drain.
         new(CreatureSpecies.MarrowLeech, CreatureBehavior.Grazer,
-            moveSpeed: 0.5f, detectRange: 20, fleeRange: 0,
-            hungerOnConsume: 12f, damageOnHit: 3f, hitCooldown: 1.0f, health: 2,
+            moveSpeed: 0.8f, detectRange: 12, fleeRange: 0,
+            hungerOnConsume: 20f, damageOnHit: 3f, hitCooldown: 3.0f, health: 2,
+            subGridSpeed: 14f, alertSpeedMultiplier: 1f,
             BiomeType.BoneStrata),
 
-        // Magma Beetle — patrols thermovents. Very tough.
+        // Magma Beetle — patrol. Leaves hazards. Huge reward but very tough.
         new(CreatureSpecies.MagmaBeetle, CreatureBehavior.Patrol,
             moveSpeed: 0.4f, detectRange: 8, fleeRange: 0,
             hungerOnConsume: 40f, damageOnHit: 10f, hitCooldown: 2.0f, health: 3,
+            subGridSpeed: 25f, alertSpeedMultiplier: 1.2f,
             BiomeType.Thermovents),
+
+        // Tube Worm — burrowed near vents. Sprays acid. Huge reward.
+        new(CreatureSpecies.TubeWorm, CreatureBehavior.Burrowed,
+            moveSpeed: 0.5f, detectRange: 4, fleeRange: 8,
+            hungerOnConsume: 35f, damageOnHit: 0f, hitCooldown: 0f, health: 2,
+            subGridSpeed: 10f, alertSpeedMultiplier: 1.5f,
+            BiomeType.Thermovents),
+
+        // Memory Slug — slow, massive hunger + lore. Harmless.
+        new(CreatureSpecies.MemorySlug, CreatureBehavior.Wander,
+            moveSpeed: 2.0f, detectRange: 0, fleeRange: 0,
+            hungerOnConsume: 50f, damageOnHit: 0f, hitCooldown: 0f, health: 1,
+            subGridSpeed: 4f, alertSpeedMultiplier: 1f,
+            BiomeType.MycelialGraveyard),
 
         // Fungal Predator — evolved to kill fungi. Nightmare creature.
         new(CreatureSpecies.FungalPredator, CreatureBehavior.Ambush,
             moveSpeed: 0.1f, detectRange: 10, fleeRange: 0,
             hungerOnConsume: 60f, damageOnHit: 20f, hitCooldown: 1.5f, health: 5,
+            subGridSpeed: 55f, alertSpeedMultiplier: 1.3f,
             BiomeType.MycelialGraveyard),
     };
 
