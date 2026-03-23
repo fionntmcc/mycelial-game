@@ -1,35 +1,31 @@
 namespace Mycorrhiza.World;
 
 using Godot;
+using System;
 using System.Collections.Generic;
 using Mycorrhiza.Data;
 
 /// <summary>
-/// Harpoon-tendril with two firing modes on the sub-grid.
+/// Harpoon-tendril with two firing modes and a hold-and-throw slam system.
 ///
-/// TAP fire: Quick press-release fires a fast, straight, unguided shot.
-///   - Uses facing direction at time of fire
-///   - Fast extension speed, short-medium range
-///   - Good for sniping visible creatures
+/// FIRING:
+///   TAP fire: Quick press-release → fast straight shot
+///   HOLD fire: Hold past threshold → guided steerable shot
 ///
-/// HOLD fire: Keep holding past a brief charge-up, then the tendril begins
-///   extending and you STEER it with movement input (WASD / left stick).
-///   - Slower extension speed, longer max range
-///   - Turn radius based on speed — feels like piloting a living thing
-///   - Release fire button to stop extending → retract begins
-///   - The main tendril head is FROZEN while steering
+/// CATCHING + THROWING:
+///   When the harpoon grabs a creature:
+///   - If fire is RELEASED → normal retract → consume creature for hunger
+///   - If fire is HELD → harpoon freezes, creature stays at tip
+///     → Player aims with movement input
+///     → Releasing fire LAUNCHES the creature as a projectile
+///     → Projectile checks for creature slam and wall splat
 ///
-/// Both modes: harpoon traces through air on the sub-grid using DDA.
-/// Grabs the first creature it hits and drags it back on retract.
-///
-/// SUB-GRID CREATURE MIGRATION:
-///   Creature detection now checks every sub-cell step (not just tile crossings).
-///   Drag uses ForceCreatureSubPosition instead of terrain-tile coords.
-///   Retract checks for creature-to-creature slam collisions.
+/// This creates a natural decision: release early to eat, hold to weaponize.
 ///
 /// SETUP:
 ///   - Add as sibling Node of TendrilController
 ///   - Assign TendrilControllerPath, ChunkManagerPath, CreatureManagerPath
+///   - Optionally assign ParticlesPath for death/slam effects
 ///   - On TendrilController, assign HarpoonPath pointing to this node
 /// </summary>
 public partial class TendrilHarpoon : Node
@@ -37,9 +33,9 @@ public partial class TendrilHarpoon : Node
 	[Export] public NodePath TendrilControllerPath { get; set; }
 	[Export] public NodePath ChunkManagerPath { get; set; }
 	[Export] public NodePath CreatureManagerPath { get; set; }
+	[Export] public NodePath ParticlesPath { get; set; }
 
 	// --- Timing ---
-	/// <summary>Hold duration before guided mode activates (seconds).</summary>
 	[Export] public float GuidedModeThreshold = 0.18f;
 
 	// --- Tap Shot Config ---
@@ -51,61 +47,76 @@ public partial class TendrilHarpoon : Node
 	[Export] public int GuidedMaxRange = 180;
 	[Export] public float GuidedStepDelay = 0.008f;
 	[Export] public int GuidedSubStepsPerTick = 2;
-	/// <summary>How fast the guided tendril can turn (radians/second).</summary>
 	[Export] public float GuidedTurnRate = 4.5f;
 
 	// --- Shape ---
-	/// <summary>Radius of the harpoon tendril in sub-cells.
-	/// 0 = single pixel, 2 = wormy, 3+ = fat.</summary>
 	[Export(PropertyHint.Range, "0,6,1")] public int HarpoonThickness = 2;
-	/// <summary>How much the edge wobbles (0 = perfect circle, higher = more organic).</summary>
 	[Export(PropertyHint.Range, "0,2,0.1")] public float ShapeIrregularity = 0.8f;
 
-	// --- Shared Config ---
+	// --- Retract ---
 	[Export] public float RetractStepDelay = 0.005f;
 	[Export] public int RetractSubStepsPerTick = 6;
+
+	// --- Cost ---
 	[Export] public float HungerCost = 5f;
 	[Export] public int CaveDetectRadius = 3;
+
+	// --- Input ---
 	[Export] public float TriggerDeadZone = 0.3f;
 	[Export] public float StickDeadZone = 0.22f;
 
-	// --- Slam Config ---
-	/// <summary>Damage dealt to a stationary creature when slammed by a dragged creature.</summary>
-	[Export] public int SlamDamageToTarget = 2;
+	// --- Slam / Throw Config ---
 
-	/// <summary>Damage dealt to the dragged creature on slam impact.</summary>
-	[Export] public int SlamDamageToProjectile = 1;
+	/// <summary>Speed of a thrown creature in sub-cells per second.</summary>
+	[Export] public float ThrowSpeed = 200f;
 
-	/// <summary>Knockback speed applied to the stationary creature on slam.</summary>
-	[Export] public float SlamKnockbackForce = 60f;
-	
-	/// <summary>Path to CreatureParticles node for slam/delivery effects.</summary>
-	[Export] public NodePath ParticlesPath { get; set; }
+	/// <summary>Max range of a thrown creature in sub-cells.</summary>
+	[Export] public int ThrowRange = 120;
+
+	/// <summary>Damage dealt to the target creature on slam.</summary>
+	[Export] public int SlamDamage = 3;
+
+	/// <summary>Damage dealt to the thrown creature on impact.</summary>
+	[Export] public int SlamSelfDamage = 1;
+
+	/// <summary>Knockback applied to the target on slam.</summary>
+	[Export] public float SlamKnockback = 80f;
+
+	/// <summary>Damage dealt to the thrown creature on wall splat (on top of SlamSelfDamage).</summary>
+	[Export] public int WallSplatExtraDamage = 1;
+
+	// --- Retract Slam Config (existing slam-during-retract) ---
+	[Export] public int RetractSlamDamageToTarget = 2;
+	[Export] public int RetractSlamDamageToProjectile = 1;
+	[Export] public float RetractSlamKnockbackForce = 60f;
 
 	// --- State Machine ---
 	private enum HarpoonState
 	{
 		Idle,
-		Winding,      // Fire button held, waiting to see if tap or guided
+		Winding,      // Fire button held, deciding tap vs guided
 		Guided,       // Extending with player steering
-		Straight,     // Extending in a straight line (tap shot)
+		Straight,     // Extending in a straight line
+		Armed,        // Creature grabbed, fire held — waiting for aim + release
+		Throwing,     // Creature launched as projectile
 		Retracting,
 	}
 
 	private TendrilController _tendril;
 	private ChunkManager _chunkManager;
 	private CreatureManager _creatureManager;
+	private CreatureParticles _particles;
 
 	private HarpoonState _state = HarpoonState.Idle;
 	private float _windTimer;
 	private float _stepTimer;
 
-	// DDA line-tracing state
+	// DDA state
 	private Vector2 _shotDirection;
 	private float _ddaX, _ddaY;
 	private int _currentSubX, _currentSubY;
 
-	// Path of sub-cells placed (center points — blob is stamped around each)
+	// Harpoon path
 	private readonly List<(int SubX, int SubY)> _harpoonPath = new();
 	private int _targetRange;
 	private int _stepsPerTick;
@@ -113,29 +124,38 @@ public partial class TendrilHarpoon : Node
 	// Grabbed creature
 	private Creature _grabbedCreature;
 
-	// Terrain tile tracking
+	// Terrain tracking
 	private int _lastCheckedTerrainX;
 	private int _lastCheckedTerrainY;
+
+	// Throw projectile state
+	private float _projX, _projY;
+	private int _projSubX, _projSubY;
+	private Vector2 _throwDirection;
+	private float _projDistanceTraveled;
+	private float _projStepAccumulator;
 
 	// Input state
 	private bool _wasSpaceHeld;
 	private bool _wasTriggerHeld;
-	
-	// Creature Particles
-	private CreatureParticles _particles;
 
 	// --- Signals ---
 	[Signal] public delegate void ChargeStartedEventHandler();
 	[Signal] public delegate void ChargeCancelledEventHandler();
 	[Signal] public delegate void HarpoonFiredEventHandler(int range);
-	[Signal] public delegate void CreatureGrabbedEventHandler(int creatureX, int creatureY);
+	[Signal] public delegate void CreatureGrabbedEventHandler(int creatureSubX, int creatureSubY);
+	[Signal] public delegate void CreatureThrownEventHandler(float dirX, float dirY);
 	[Signal] public delegate void HarpoonRetractedEventHandler(bool caughtSomething);
 	[Signal] public delegate void CreatureSlammedEventHandler(int targetSubX, int targetSubY);
+	[Signal] public delegate void WallSplatEventHandler(int subX, int subY);
 
-	/// <summary>True when the harpoon is doing anything (TendrilController checks this to freeze).</summary>
+	/// <summary>True when the harpoon is doing anything.</summary>
 	public bool IsActive => _state != HarpoonState.Idle;
 
-	/// <summary>0–1 charge indicator for HUD display.</summary>
+	/// <summary>True when armed and waiting for throw.</summary>
+	public bool IsArmed => _state == HarpoonState.Armed;
+
+	/// <summary>0–1 charge indicator for HUD.</summary>
 	public float ChargePercent => _state == HarpoonState.Winding
 		? Mathf.Clamp(_windTimer / GuidedModeThreshold, 0f, 1f) : 0f;
 
@@ -157,7 +177,13 @@ public partial class TendrilHarpoon : Node
 	public override void _Process(double delta)
 	{
 		if (_tendril == null || _chunkManager == null) return;
-		if (_tendril.IsRetreating || _tendril.IsRegenerating) return;
+		if (_tendril.IsRetreating || _tendril.IsRegenerating)
+		{
+			// If retreating, cancel everything
+			if (_state != HarpoonState.Idle)
+				CancelAndCleanup();
+			return;
+		}
 
 		float dt = (float)delta;
 
@@ -174,6 +200,12 @@ public partial class TendrilHarpoon : Node
 				break;
 			case HarpoonState.Guided:
 				ProcessGuided(dt);
+				break;
+			case HarpoonState.Armed:
+				ProcessArmed(dt);
+				break;
+			case HarpoonState.Throwing:
+				ProcessThrowing(dt);
 				break;
 			case HarpoonState.Retracting:
 				ProcessRetracting(dt);
@@ -197,7 +229,7 @@ public partial class TendrilHarpoon : Node
 	}
 
 	// =========================================================================
-	//  WINDING — waiting to see if this is a tap or a hold
+	//  WINDING
 	// =========================================================================
 
 	private void ProcessWinding(float dt)
@@ -205,17 +237,13 @@ public partial class TendrilHarpoon : Node
 		_windTimer += dt;
 
 		if (!IsFireInputHeld())
-		{
 			FireStraight();
-		}
 		else if (_windTimer >= GuidedModeThreshold)
-		{
 			FireGuided();
-		}
 	}
 
 	// =========================================================================
-	//  FIRE — initialize DDA from head position
+	//  FIRE
 	// =========================================================================
 
 	private void InitializeShot()
@@ -250,7 +278,6 @@ public partial class TendrilHarpoon : Node
 
 		_state = HarpoonState.Straight;
 		EmitSignal(SignalName.HarpoonFired, _targetRange);
-		GD.Print($"Harpoon TAP! Dir: ({_shotDirection.X:F2},{_shotDirection.Y:F2}), Range: {_targetRange}");
 	}
 
 	private void FireGuided()
@@ -267,11 +294,10 @@ public partial class TendrilHarpoon : Node
 
 		_state = HarpoonState.Guided;
 		EmitSignal(SignalName.HarpoonFired, _targetRange);
-		GD.Print($"Harpoon GUIDED! Dir: ({_shotDirection.X:F2},{_shotDirection.Y:F2}), Range: {_targetRange}");
 	}
 
 	// =========================================================================
-	//  STRAIGHT EXTENDING — fast, no steering
+	//  STRAIGHT EXTENDING
 	// =========================================================================
 
 	private void ProcessExtending(float dt)
@@ -288,30 +314,25 @@ public partial class TendrilHarpoon : Node
 	}
 
 	// =========================================================================
-	//  GUIDED EXTENDING — slower, player steers with movement input
+	//  GUIDED EXTENDING
 	// =========================================================================
 
 	private void ProcessGuided(float dt)
 	{
 		if (!IsFireInputHeld())
 		{
-			GD.Print("Guided shot released, retracting.");
 			StartRetract();
 			return;
 		}
 
-		// Steer: rotate _shotDirection toward movement input
 		Vector2 steerInput = GetSteerInputVector();
 		if (steerInput.LengthSquared() > 0.01f)
 		{
 			Vector2 targetDir = steerInput.Normalized();
-
 			float currentAngle = Mathf.Atan2(_shotDirection.Y, _shotDirection.X);
 			float targetAngle = Mathf.Atan2(targetDir.Y, targetDir.X);
-
 			float maxTurn = GuidedTurnRate * dt;
 			float newAngle = Mathf.LerpAngle(currentAngle, targetAngle, Mathf.Clamp(maxTurn, 0f, 1f));
-
 			_shotDirection = new Vector2(Mathf.Cos(newAngle), Mathf.Sin(newAngle));
 		}
 
@@ -327,8 +348,7 @@ public partial class TendrilHarpoon : Node
 	}
 
 	// =========================================================================
-	//  DDA STEP — shared by both modes
-	//  CHANGED: Creature detection now uses sub-grid (every step, not just tile crossings)
+	//  DDA STEP — shared by both extend modes
 	// =========================================================================
 
 	private bool ExtendOneStep()
@@ -345,21 +365,31 @@ public partial class TendrilHarpoon : Node
 		_currentSubX = newSubX;
 		_currentSubY = newSubY;
 
-		// --- CREATURE HIT CHECK (every sub-step, pixel-perfect) ---
-		// This runs BEFORE the terrain check so we can grab creatures
-		// even if they're standing at the edge of a cave.
+		// --- Creature hit check (every sub-step) ---
 		Creature hitCreature = _creatureManager?.GetCreatureAtSubGrid(newSubX, newSubY);
 		if (hitCreature != null)
 		{
 			PlaceHarpoonCell(newSubX, newSubY);
 			_grabbedCreature = hitCreature;
-			GD.Print($"Harpoon grabbed {hitCreature.Species} at sub ({newSubX},{newSubY})!");
 			EmitSignal(SignalName.CreatureGrabbed, hitCreature.SubX, hitCreature.SubY);
-			StartRetract();
+
+			// KEY DECISION: is fire still held?
+			if (IsFireInputHeld())
+			{
+				// Player is holding → enter Armed state, don't retract
+				_state = HarpoonState.Armed;
+				GD.Print($"Harpoon grabbed {hitCreature.Species} — ARMED! Aim and release to throw.");
+			}
+			else
+			{
+				// Player already released → normal retract + consume
+				GD.Print($"Harpoon grabbed {hitCreature.Species} — retracting to consume.");
+				StartRetract();
+			}
 			return false;
 		}
 
-		// --- TERRAIN CHECK (only on tile boundary crossings) ---
+		// --- Terrain check (tile boundary crossings) ---
 		var (terrainX, terrainY) = SubGridData.SubToTerrain(newSubX, newSubY);
 		bool newTerrainTile = (terrainX != _lastCheckedTerrainX || terrainY != _lastCheckedTerrainY);
 
@@ -368,20 +398,16 @@ public partial class TendrilHarpoon : Node
 			_lastCheckedTerrainX = terrainX;
 			_lastCheckedTerrainY = terrainY;
 
-			// Wall hit? (harpoon only travels through air)
 			TileType tile = _chunkManager.GetTileAt(terrainX, terrainY);
 			if (tile != TileType.Air)
 			{
-				GD.Print($"Harpoon hit {tile} at ({terrainX},{terrainY}), retracting.");
 				StartRetract();
 				return false;
 			}
 		}
 
-		// Max range?
 		if (_harpoonPath.Count >= _targetRange)
 		{
-			GD.Print("Harpoon max range, retracting.");
 			StartRetract();
 			return false;
 		}
@@ -391,14 +417,268 @@ public partial class TendrilHarpoon : Node
 	}
 
 	// =========================================================================
-	//  HARPOON SHAPE — organic blob stamped at each path point
+	//  ARMED — creature grabbed, fire held, waiting for aim + release
 	// =========================================================================
 
+	private void ProcessArmed(float dt)
+	{
+		if (_grabbedCreature == null || !_grabbedCreature.IsAlive)
+		{
+			// Creature died somehow — just retract
+			StartRetract();
+			return;
+		}
+
+		// Keep creature at the harpoon tip
+		if (_harpoonPath.Count > 0)
+		{
+			var (tipX, tipY) = _harpoonPath[^1];
+			_creatureManager?.ForceCreatureSubPosition(_grabbedCreature, tipX, tipY);
+		}
+
+		// Player releases fire → THROW in aimed direction
+		if (!IsFireInputHeld())
+		{
+			// Get aim direction from movement input
+			Vector2 aimDir = GetSteerInputVector();
+
+			if (aimDir.LengthSquared() < 0.01f)
+			{
+				// No aim input — use the harpoon's current direction
+				aimDir = _shotDirection;
+			}
+			else
+			{
+				aimDir = aimDir.Normalized();
+			}
+
+			LaunchCreature(aimDir);
+			return;
+		}
+	}
+
 	/// <summary>
-	/// Stamp an organic blob of sub-cells around a center point.
-	/// HarpoonThickness controls radius, ShapeIrregularity controls edge wobble.
-	/// At thickness 0, places a single sub-cell.
+	/// Launch the grabbed creature as a projectile and begin retracting the harpoon line.
 	/// </summary>
+	private void LaunchCreature(Vector2 direction)
+	{
+		if (_grabbedCreature == null) return;
+
+		// Set up projectile from the harpoon tip position
+		if (_harpoonPath.Count > 0)
+		{
+			var (tipX, tipY) = _harpoonPath[^1];
+			_projX = tipX;
+			_projY = tipY;
+			_projSubX = tipX;
+			_projSubY = tipY;
+		}
+		else
+		{
+			_projX = _grabbedCreature.SubX;
+			_projY = _grabbedCreature.SubY;
+			_projSubX = _grabbedCreature.SubX;
+			_projSubY = _grabbedCreature.SubY;
+		}
+
+		_throwDirection = direction;
+		_projDistanceTraveled = 0f;
+		_projStepAccumulator = 0f;
+
+		_state = HarpoonState.Throwing;
+
+		// Start retracting the harpoon line in the background
+		// (the line cleans up while the creature flies independently)
+
+		EmitSignal(SignalName.CreatureThrown, direction.X, direction.Y);
+		GD.Print($"THREW {_grabbedCreature.Species}! Dir: ({direction.X:F2},{direction.Y:F2})");
+	}
+
+	// =========================================================================
+	//  THROWING — creature in flight as projectile
+	// =========================================================================
+
+	private void ProcessThrowing(float dt)
+	{
+		// Also retract the harpoon line while the creature flies
+		RetractLineStep(dt);
+
+		if (_grabbedCreature == null || !_grabbedCreature.IsAlive)
+		{
+			// Creature died during flight — finish up
+			if (_harpoonPath.Count == 0)
+			{
+				_grabbedCreature = null;
+				_state = HarpoonState.Idle;
+			}
+			return;
+		}
+
+		// Advance projectile
+		_projStepAccumulator += ThrowSpeed * dt;
+
+		int steps = 0;
+		while (_projStepAccumulator >= 1f && steps < 12)
+		{
+			_projStepAccumulator -= 1f;
+			steps++;
+
+			_projX += _throwDirection.X;
+			_projY += _throwDirection.Y;
+			_projDistanceTraveled += 1f;
+
+			int newSubX = (int)Mathf.Floor(_projX);
+			int newSubY = (int)Mathf.Floor(_projY);
+
+			if (newSubX == _projSubX && newSubY == _projSubY)
+				continue;
+
+			_projSubX = newSubX;
+			_projSubY = newSubY;
+
+			_creatureManager?.ForceCreatureSubPosition(_grabbedCreature, _projSubX, _projSubY);
+
+			if (CheckThrowCreatureHit())
+				return;
+
+			if (CheckThrowTerrainHit())
+				return;
+
+			if (_projDistanceTraveled >= ThrowRange)
+			{
+				ThrowMiss();
+				return;
+			}
+		}
+	}
+
+	private bool CheckThrowCreatureHit()
+	{
+		int projRadius = _grabbedCreature.Body?.Radius ?? 3;
+
+		foreach (var other in _creatureManager.GetActiveCreatures())
+		{
+			if (other == _grabbedCreature) continue;
+
+			int otherRadius = other.Body?.Radius ?? 3;
+			int minDist = projRadius + otherRadius;
+
+			int dx = _projSubX - other.SubX;
+			int dy = _projSubY - other.SubY;
+
+			if (dx * dx + dy * dy > minDist * minDist) continue;
+
+			// SLAM HIT
+			bool targetDied = _creatureManager.DamageCreature(other, SlamDamage);
+			bool projDied = _creatureManager.DamageCreature(_grabbedCreature, SlamSelfDamage);
+
+			// Knockback target
+			if (other.IsAlive)
+			{
+				float dist = Mathf.Sqrt(dx * dx + dy * dy);
+				Vector2 knockDir = dist > 0.01f
+					? new Vector2(dx, dy) / dist
+					: _throwDirection;
+				_creatureManager.ApplyImpulse(other, knockDir * SlamKnockback);
+			}
+
+			// Particles
+			_particles?.SpawnDamageHit(other, _projSubX, _projSubY);
+
+			if (targetDied)
+			{
+				var targetConfig = CreatureRegistry.GetConfig(other.Species);
+				_tendril.AddHunger(targetConfig.HungerOnConsume);
+				_particles?.SpawnBurst(other, _projSubX, _projSubY);
+				GD.Print($"SLAM KILL! {_grabbedCreature.Species} → {other.Species}! +{targetConfig.HungerOnConsume} hunger");
+			}
+			else
+			{
+				GD.Print($"SLAM! {_grabbedCreature.Species} → {other.Species}! {other.Health} HP left");
+			}
+
+			EmitSignal(SignalName.CreatureSlammed, other.SubX, other.SubY);
+
+			// Handle projectile creature
+			if (projDied)
+			{
+				var projConfig = CreatureRegistry.GetConfig(_grabbedCreature.Species);
+				_tendril.AddHunger(projConfig.HungerOnConsume * 0.5f);
+				_particles?.SpawnBurst(_grabbedCreature, _projSubX, _projSubY);
+				_creatureManager.KillCreatureExternal(_grabbedCreature);
+			}
+			else
+			{
+				// Survives — bounces back slightly, resumes AI
+				_creatureManager.ApplyImpulse(_grabbedCreature, _throwDirection * -30f);
+			}
+
+			FinishThrow();
+			return true;
+		}
+
+		return false;
+	}
+
+	private bool CheckThrowTerrainHit()
+	{
+		var (terrainX, terrainY) = SubGridData.SubToTerrain(_projSubX, _projSubY);
+		TileType tile = _chunkManager.GetTileAt(terrainX, terrainY);
+
+		if (tile == TileType.Air) return false;
+		if (TileProperties.Is(tile, TileFlags.Organic) && !TileProperties.Is(tile, TileFlags.Solid))
+			return false;
+
+		// WALL SPLAT
+		_particles?.SpawnBurst(_grabbedCreature, _projSubX, _projSubY);
+
+		bool died = _creatureManager.DamageCreature(_grabbedCreature, SlamSelfDamage + WallSplatExtraDamage);
+
+		if (died)
+		{
+			var config = CreatureRegistry.GetConfig(_grabbedCreature.Species);
+			_tendril.AddHunger(config.HungerOnConsume * 0.25f);
+			_creatureManager.KillCreatureExternal(_grabbedCreature);
+			GD.Print($"SPLAT! {_grabbedCreature.Species} hit a wall!");
+		}
+		else
+		{
+			_creatureManager.ApplyImpulse(_grabbedCreature, _throwDirection * -20f);
+			GD.Print($"{_grabbedCreature.Species} hit a wall but survived!");
+		}
+
+		EmitSignal(SignalName.WallSplat, _projSubX, _projSubY);
+
+		FinishThrow();
+		return true;
+	}
+
+	private void ThrowMiss()
+	{
+		if (_grabbedCreature != null && _grabbedCreature.IsAlive)
+		{
+			_creatureManager.ApplyImpulse(_grabbedCreature, _throwDirection * 15f);
+			GD.Print($"Threw {_grabbedCreature.Species} — missed!");
+		}
+
+		FinishThrow();
+	}
+
+	private void FinishThrow()
+	{
+		_grabbedCreature = null;
+
+		// If harpoon line is still retracting, let it finish
+		if (_harpoonPath.Count > 0)
+			_state = HarpoonState.Retracting;
+		else
+			_state = HarpoonState.Idle;
+	}
+
+	// =========================================================================
+	//  HARPOON SHAPE
+	// =========================================================================
+
 	private void PlaceHarpoonCell(int subX, int subY)
 	{
 		_harpoonPath.Add((subX, subY));
@@ -418,14 +698,12 @@ public partial class TendrilHarpoon : Node
 				float dist = Mathf.Sqrt(dx * dx + dy * dy);
 				if (dist > r) continue;
 
-				// Irregular edge — sine-based noise seeded by world position
 				float noise = Mathf.Sin((subX + dx) * 0.9f + (subY + dy) * 1.3f) * ShapeIrregularity;
 				if (dist + noise > r) continue;
 
 				int sx = subX + dx;
 				int sy = subY + dy;
 
-				// Intensity falls off toward edge for fleshy gradient
 				float edgeFade = 1f - Mathf.Clamp(dist / r, 0f, 1f);
 				byte intensity = (byte)(220 - (int)((1f - edgeFade) * 80));
 
@@ -434,10 +712,6 @@ public partial class TendrilHarpoon : Node
 		}
 	}
 
-	/// <summary>
-	/// Clear the blob footprint at a path point.
-	/// Must match PlaceHarpoonCell radius.
-	/// </summary>
 	private void ClearHarpoonCell(int subX, int subY)
 	{
 		int r = HarpoonThickness;
@@ -460,7 +734,6 @@ public partial class TendrilHarpoon : Node
 
 	// =========================================================================
 	//  RETRACTING
-	//  CHANGED: Drag uses sub-grid coords. Checks for creature-creature slam.
 	// =========================================================================
 
 	private void StartRetract()
@@ -487,25 +760,20 @@ public partial class TendrilHarpoon : Node
 			_harpoonPath.RemoveAt(_harpoonPath.Count - 1);
 			ClearHarpoonCell(rx, ry);
 
-			// Drag creature along using sub-grid coordinates
+			// Drag creature along during retract
 			if (_grabbedCreature != null && _grabbedCreature.IsAlive && _harpoonPath.Count > 0)
 			{
 				var (tipSubX, tipSubY) = _harpoonPath[^1];
-
-				// Move the grabbed creature to the harpoon tip position (sub-grid)
 				_creatureManager?.ForceCreatureSubPosition(_grabbedCreature, tipSubX, tipSubY);
-
-				// Check for creature-creature slam collision
-				CheckSlamCollision(tipSubX, tipSubY);
+				CheckRetractSlamCollision(tipSubX, tipSubY);
 			}
 		}
 	}
 
 	/// <summary>
-	/// Check if the dragged creature has collided with another creature during retract.
-	/// If so, deal damage to both and knock the stationary one away.
+	/// Check for slam during normal retract (creature dragged through another).
 	/// </summary>
-	private void CheckSlamCollision(int projectileSubX, int projectileSubY)
+	private void CheckRetractSlamCollision(int projectileSubX, int projectileSubY)
 	{
 		if (_grabbedCreature == null || !_grabbedCreature.IsAlive) return;
 		if (_creatureManager == null) return;
@@ -524,47 +792,59 @@ public partial class TendrilHarpoon : Node
 
 			if (sdx * sdx + sdy * sdy > minDist * minDist) continue;
 
-			// SLAM! Damage both creatures
-			bool targetDied = _creatureManager.DamageCreature(other, SlamDamageToTarget);
-			bool projectileDied = _creatureManager.DamageCreature(_grabbedCreature, SlamDamageToProjectile);
+			bool targetDied = _creatureManager.DamageCreature(other, RetractSlamDamageToTarget);
+			bool projectileDied = _creatureManager.DamageCreature(_grabbedCreature, RetractSlamDamageToProjectile);
 
-			// Knockback the stationary creature away from the impact
 			if (other.IsAlive)
 			{
 				float dist = Mathf.Sqrt(sdx * sdx + sdy * sdy);
-				Vector2 knockDir;
-				if (dist > 0.01f)
-					knockDir = new Vector2(sdx, sdy) / dist;
-				else
-					knockDir = new Vector2(0, -1); // Default up if perfectly overlapping
-
-				_creatureManager.ApplyImpulse(other, knockDir * -SlamKnockbackForce);
+				Vector2 knockDir = dist > 0.01f
+					? new Vector2(sdx, sdy) / dist
+					: new Vector2(0, -1);
+				_creatureManager.ApplyImpulse(other, knockDir * -RetractSlamKnockbackForce);
 			}
 
-			// Grant hunger for kills
+			_particles?.SpawnDamageHit(other, projectileSubX, projectileSubY);
+
 			if (targetDied)
 			{
 				var config = CreatureRegistry.GetConfig(other.Species);
 				_tendril.AddHunger(config.HungerOnConsume);
-				GD.Print($"SLAM! {_grabbedCreature.Species} killed {other.Species}! +{config.HungerOnConsume} hunger");
+				_particles?.SpawnBurst(other, projectileSubX, projectileSubY);
+				GD.Print($"RETRACT SLAM! {_grabbedCreature.Species} killed {other.Species}!");
 			}
-			else
-			{
-				GD.Print($"SLAM! {_grabbedCreature.Species} hit {other.Species}!");
-			}
-				
-			_particles?.SpawnDamageHit(other, projectileSubX, projectileSubY);
+
 			EmitSignal(SignalName.CreatureSlammed, other.SubX, other.SubY);
 
-			// If the projectile died from the impact, drop it
 			if (projectileDied)
 			{
 				var projConfig = CreatureRegistry.GetConfig(_grabbedCreature.Species);
 				_tendril.AddHunger(projConfig.HungerOnConsume);
+				_particles?.SpawnBurst(_grabbedCreature, projectileSubX, projectileSubY);
+				_creatureManager.KillCreatureExternal(_grabbedCreature);
 				_grabbedCreature = null;
-				GD.Print("Projectile creature died from slam impact!");
 				return;
 			}
+		}
+	}
+
+	/// <summary>
+	/// Retract a few harpoon line cells. Used by ProcessThrowing to clean up the
+	/// harpoon line while the creature flies independently.
+	/// </summary>
+	private void RetractLineStep(float dt)
+	{
+		_stepTimer -= dt;
+		if (_stepTimer > 0f) return;
+		_stepTimer = RetractStepDelay;
+
+		for (int i = 0; i < RetractSubStepsPerTick; i++)
+		{
+			if (_harpoonPath.Count == 0) return;
+
+			var (rx, ry) = _harpoonPath[^1];
+			_harpoonPath.RemoveAt(_harpoonPath.Count - 1);
+			ClearHarpoonCell(rx, ry);
 		}
 	}
 
@@ -574,21 +854,40 @@ public partial class TendrilHarpoon : Node
 
 		if (caught)
 		{
+			// Normal retract with creature → consume it
 			var config = CreatureRegistry.GetConfig(_grabbedCreature.Species);
 			_tendril.AddHunger(config.HungerOnConsume);
 			_particles?.SpawnBurst(_grabbedCreature, _tendril.SubHeadX, _tendril.SubHeadY);
 			_creatureManager?.KillCreatureExternal(_grabbedCreature);
-			GD.Print($"Harpoon delivered {_grabbedCreature.Species}! +{config.HungerOnConsume} hunger");
-		}
-		else
-		{
-			GD.Print("Harpoon retracted empty.");
+			GD.Print($"Consumed {_grabbedCreature.Species}! +{config.HungerOnConsume} hunger");
 		}
 
 		_grabbedCreature = null;
 		_harpoonPath.Clear();
 		_state = HarpoonState.Idle;
 		EmitSignal(SignalName.HarpoonRetracted, caught);
+	}
+
+	/// <summary>
+	/// Emergency cleanup — cancel everything and return to idle.
+	/// Used when tendril retreats while harpoon is active.
+	/// </summary>
+	private void CancelAndCleanup()
+	{
+		// Clear all harpoon cells
+		foreach (var (rx, ry) in _harpoonPath)
+			ClearHarpoonCell(rx, ry);
+		_harpoonPath.Clear();
+
+		// Drop grabbed creature if any
+		if (_grabbedCreature != null && _grabbedCreature.IsAlive)
+		{
+			// Just leave it where it is
+			_creatureManager?.ApplyImpulse(_grabbedCreature, Vector2.Zero);
+		}
+
+		_grabbedCreature = null;
+		_state = HarpoonState.Idle;
 	}
 
 	// =========================================================================
