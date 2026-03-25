@@ -361,7 +361,7 @@ public partial class TendrilHarpoon : Node
 		_state = HarpoonState.Straight;
 
 		if (IsThrowAvailable)
-			_tendril?.BeginRushFollow();
+			_tendril?.Rush.BeginFollow();
 
 		EmitSignal(SignalName.HarpoonFired, _targetRange);
 	}
@@ -381,7 +381,7 @@ public partial class TendrilHarpoon : Node
 		_state = HarpoonState.Guided;
 
 		if (IsThrowAvailable)
-			_tendril?.BeginRushFollow();
+			_tendril?.Rush.BeginFollow();
 
 		EmitSignal(SignalName.HarpoonFired, _targetRange);
 	}
@@ -526,7 +526,7 @@ public partial class TendrilHarpoon : Node
 		}
 
 		// Wait for the controller to arrive before allowing eat/throw
-		if (_tendril != null && _tendril.IsRushFollowing)
+		if (_tendril != null && _tendril.Rush.IsFollowing)
 			return;
 
 		// Controller has arrived at the tip — player can now act
@@ -554,7 +554,7 @@ public partial class TendrilHarpoon : Node
 				aimDir = aimDir.Normalized();
 
 			// Controller stays at tip — committed to the throw
-			_tendril?.ResolveRushHold();
+			_tendril?.Rush.ResolveHold();
 			LaunchCreature(aimDir);
 			return;
 		}
@@ -818,7 +818,7 @@ public partial class TendrilHarpoon : Node
 		ApplyRushInteractionsAt(collisionSubX, collisionSubY);
 
 		// Give the controller a momentum impulse
-		_tendril.ApplyRushImpulse(_rushDirection, distance);
+		_tendril.Rush.ApplyImpulse(_rushDirection, distance);
 
 		_grabbedCreature = null;
 		_state = HarpoonState.Rushing;
@@ -835,7 +835,7 @@ public partial class TendrilHarpoon : Node
 			ApplyRushInteractionsAt(_tendril.SubHeadX, _tendril.SubHeadY);
 
 		// Rush ends when the controller's dash is done
-		if (_tendril == null || !_tendril.IsRushDashing)
+		if (_tendril == null || !_tendril.Rush.IsDashing)
 		{
 			FinishRush();
 			return;
@@ -886,7 +886,7 @@ public partial class TendrilHarpoon : Node
 	private void FinishRush()
 	{
 		_rushProcessed.Clear();
-		_tendril?.CleanupRushTrail();
+		_tendril?.Rush.CleanupTrail();
 
 		if (_harpoonPath.Count > 0)
 			_state = HarpoonState.Retracting;
@@ -899,7 +899,7 @@ public partial class TendrilHarpoon : Node
 		_grabbedCreature = null;
 
 		// Clean up rush trail and snap controller back to origin
-		_tendril?.CleanupRushTrailAndReturn();
+		_tendril?.Rush.CleanupTrailAndReturn();
 
 		// If harpoon line is still retracting, let it finish
 		if (_harpoonPath.Count > 0)
@@ -972,8 +972,8 @@ public partial class TendrilHarpoon : Node
 	private void StartRetract()
 	{
 		// Smooth retract-follow when the controller has moved along the harpoon
-		if (_tendril != null && (_tendril.IsRushFollowing || _tendril.IsRushHolding))
-			_tendril.BeginRetractFollow();
+		if (_tendril != null && (_tendril.Rush.IsFollowing || _tendril.Rush.IsHolding))
+			_tendril.Rush.BeginRetractFollow();
 
 		_state = HarpoonState.Retracting;
 		_stepTimer = 0f;
@@ -998,10 +998,10 @@ public partial class TendrilHarpoon : Node
 			ClearHarpoonCell(rx, ry);
 
 			// Move controller backward along the harpoon path
-			if (_tendril != null && _tendril.IsRetractFollowing && _harpoonPath.Count > 0)
+			if (_tendril != null && _tendril.Rush.IsRetractFollowing && _harpoonPath.Count > 0)
 			{
 				var (tipX, tipY) = _harpoonPath[^1];
-				_tendril.RetractFollowStep(tipX, tipY);
+				_tendril.Rush.RetractFollowStep(tipX, tipY);
 			}
 
 			// Drag creature along during retract
@@ -1107,7 +1107,7 @@ public partial class TendrilHarpoon : Node
 		}
 
 		// Finish the controller's retract-follow if it was active
-		_tendril?.FinishRetractFollow();
+		_tendril?.Rush.FinishRetractFollow();
 
 		_grabbedCreature = null;
 		_harpoonPath.Clear();
@@ -1122,8 +1122,8 @@ public partial class TendrilHarpoon : Node
 	private void CancelAndCleanup()
 	{
 		// Cancel rush-follow or retract-follow if active
-		_tendril?.CancelRushFollow();
-		_tendril?.FinishRetractFollow();
+		_tendril?.Rush.CancelFollow();
+		_tendril?.Rush.FinishRetractFollow();
 
 		// Clear all harpoon cells
 		foreach (var (rx, ry) in _harpoonPath)
