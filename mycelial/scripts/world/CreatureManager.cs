@@ -816,6 +816,9 @@ public partial class CreatureManager : Node2D
 	{
 		if (!creature.IsAlive || !creature.IsActive) return;
 
+		// Don't auto-eat while the harpoon is doing anything (extending, armed, throwing, rushing, retracting)
+		if (_tendril.Harpoon != null && _tendril.Harpoon.IsActive) return;
+
 		// Broad phase: is the creature even close to the tendril head?
 		int headSubX = _tendril.SubHeadX;
 		int headSubY = _tendril.SubHeadY;
@@ -837,17 +840,17 @@ public partial class CreatureManager : Node2D
 		{
 			if (creature.AttackCooldown <= 0)
 			{
-				_tendril.DrainHunger(config.DamageOnHit);
+				_tendril.DamageVitality(config.DamageOnHit);
 				creature.AttackCooldown = config.HitCooldown;
 				creature.DamageFlashTimer = DamageFlashDuration;
 
 				creature.Health--;
 				if (creature.Health <= 0)
 				{
-					_tendril.AddHunger(config.HungerOnConsume);
+					_tendril.AddVigor(config.VigorOnConsume);
 					_particles?.SpawnBurst(creature, _tendril.SubHeadX, _tendril.SubHeadY);
 					creature.IsAlive = false;
-					GD.Print($"Killed {creature.Species}! +{config.HungerOnConsume} hunger");
+					GD.Print($"Killed {creature.Species}! +{config.VigorOnConsume} vigor");
 				}
 				else
 				{
@@ -861,17 +864,17 @@ public partial class CreatureManager : Node2D
 					// Damage hit particles (smaller burst)
 					_particles?.SpawnDamageHit(creature, _tendril.SubHeadX, _tendril.SubHeadY);
 
-					GD.Print($"{creature.Species} hit you! -{config.DamageOnHit} hunger. HP: {creature.Health}");
+					GD.Print($"{creature.Species} hit you! -{config.DamageOnHit} vitality. HP: {creature.Health}");
 				}
 			}
 		}
 		else
 		{
 			// Prey — consumed on contact
-			_tendril.AddHunger(config.HungerOnConsume);
+			_tendril.AddVigor(config.VigorOnConsume);
 			_particles?.SpawnBurst(creature, _tendril.SubHeadX, _tendril.SubHeadY);
 			creature.IsAlive = false;
-			GD.Print($"Consumed {creature.Species}! +{config.HungerOnConsume} hunger");
+			GD.Print($"Consumed {creature.Species}! +{config.VigorOnConsume} vigor");
 		}
 	}
 

@@ -14,6 +14,7 @@
 [ext_resource type="Script" uid="uid://eti3psjumq4a" path="res://scripts/world/TendrilHarpoon.cs" id="12_q5onr"]
 [ext_resource type="Script" uid="uid://csfalpa7uatxs" path="res://scripts/world/CreatureRenderer.cs" id="13_jhx03"]
 [ext_resource type="Script" uid="uid://deo38j4v7kps3" path="res://scripts/world/CreatureParticles.cs" id="14_o8fc1"]
+[ext_resource type="Script" path="res://scripts/world/TendrilVitality.cs" id="15_vital"]
 
 [node name="World" type="Node2D" unique_id=185312821]
 
@@ -39,7 +40,6 @@ ChunkManagerPath = NodePath("../ChunkManager")
 [node name="TendrilController" type="Node2D" parent="." unique_id=1420415883]
 script = ExtResource("5_qfnet")
 ChunkManagerPath = NodePath("../ChunkManager")
-HungerRegenOnCorrupted = 4.0
 MoveDelay = 0.09
 MomentumAcceleration = 15.0
 MomentumDrag = 5.0
@@ -51,6 +51,12 @@ BlobNoiseFrequency = 3.0
 BlobStretchFactor = 0.3
 CreatureManagerPath = NodePath("../CreatureManager")
 HarpoonPath = NodePath("../TendrilHarpoon")
+
+[node name="TendrilVitality" type="Node" parent="TendrilController"]
+script = ExtResource("15_vital")
+DisconnectVitalityDrain = 0.0
+DisconnectDrainEscalation = 0.0
+VigorDecayRate = 3.0
 
 [node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
 script = ExtResource("7_4mrxx")
@@ -115,8 +121,6 @@ GuidedTurnRate = 7.0
 HarpoonThickness = 1
 ShapeIrregularity = 1.0
 GrabPulseDuration = 1.0
-ThrowUnlocked = true
-RushSearchDistanceBlocks = 50
 
 [node name="CreatureRenderer" type="Sprite2D" parent="." unique_id=369762693]
 script = ExtResource("13_jhx03")

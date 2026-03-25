@@ -26,12 +26,8 @@ public partial class TendrilController : Node2D
 {
 	[Export] public NodePath ChunkManagerPath { get; set; }
 
-	// --- Hunger Config ---
-	[Export] public float MaxHunger = 100f;
-	[Export] public float HungerPerMove = 0.8f;
-	[Export] public float HungerPerHardMove = 2.5f;
-	[Export] public float HungerOnCorrupted = 0.2f;
-	[Export] public float HungerRegenOnCorrupted = 0.8f;
+	// --- Connection Config ---
+	[Export] public int ConnectionBfsMaxNodes = 5000;
 
 	// --- Movement Config ---
 	[Export] public float MoveDelay = 0.08f;
@@ -76,6 +72,29 @@ public partial class TendrilController : Node2D
 
 	/// <summary>Speed of the blob shape animation (makes it pulse/shift).</summary>
 	[Export] public float BlobAnimSpeed = 1.8f;
+
+	// --- Rush Follow Config ---
+	/// <summary>Delay between rush-follow animation steps.</summary>
+	[Export] public float RushFollowStepDelay = 0.003f;
+
+	/// <summary>Number of sub-steps per tick during rush-follow.</summary>
+	[Export] public int RushFollowSubStepsPerTick = 5;
+
+	// --- Rush Dash Config ---
+	/// <summary>Base impulse applied on rush dash (sub-cells/s).</summary>
+	[Export] public float RushDashBaseImpulse = 180f;
+
+	/// <summary>Additional impulse per sub-cell of distance to collision.</summary>
+	[Export] public float RushDashDistanceScale = 1.5f;
+
+	/// <summary>Drag applied during rush dash (decelerates over time).</summary>
+	[Export] public float RushDashDrag = 1.8f;
+
+	/// <summary>Minimum speed to maintain during rush dash. Below this the rush ends.</summary>
+	[Export] public float RushDashMinSpeed = 40f;
+
+	/// <summary>Max sub-steps per frame during rush dash (higher = smoother at speed).</summary>
+	[Export] public int RushDashMaxSubSteps = 24;
 
 	// --- Creature Auto-Steer ---
 	/// <summary>Path to CreatureManager node (for auto-steering toward nearby prey).</summary>
@@ -177,9 +196,38 @@ public partial class TendrilController : Node2D
 		);
 	}
 
-	public float Hunger { get; private set; }
+	/// <summary>The vitality/vigor component. Found automatically as a child node.</summary>
+	public TendrilVitality Vitals { get; private set; }
+
+	// --- Delegation properties so external code can still read off the controller ---
+	public float Vitality => Vitals.Vitality;
+	public float MaxVitality => Vitals.MaxVitality;
+	public float Vigor => Vitals.Vigor;
+	public float MaxVigor => Vitals.MaxVigor;
+	public new bool IsConnected => Vitals.IsConnected;
+	public float VigorGainSlamKill => Vitals.VigorGainSlamKill;
+	public float VigorGainHarpoonCatch => Vitals.VigorGainHarpoonCatch;
 	public bool IsRetreating { get; private set; }
 	public bool IsRegenerating { get; private set; }
+
+	// Vigor multipliers — delegated to TendrilVitality
+	public float SpeedMultiplier => Vitals.SpeedMultiplier;
+	public float BlobSizeMultiplier => Vitals.BlobSizeMultiplier;
+	public float HarpoonRangeMultiplier => Vitals.HarpoonRangeMultiplier;
+	public float RootSpreadMultiplier => Vitals.RootSpreadMultiplier;
+	public float CorruptionSpeedMultiplier => Vitals.CorruptionSpeedMultiplier;
+
+	/// <summary>True when the controller is creeping along the harpoon path toward the tip.</summary>
+	public bool IsRushFollowing { get; private set; }
+
+	/// <summary>True when the controller is holding at the harpoon tip, waiting for eat/throw.</summary>
+	public bool IsRushHolding { get; private set; }
+
+	/// <summary>True when the controller is dashing through air after a throw collision.</summary>
+	public bool IsRushDashing { get; private set; }
+
+	/// <summary>True when the controller is following the harpoon backward during retraction.</summary>
+	public bool IsRetractFollowing { get; private set; }
 
 	// Trail: sub-grid positions (most recent first) for retreat path.
 	// Only records one entry per terrain tile crossing to keep retreat smooth
@@ -217,6 +265,17 @@ public partial class TendrilController : Node2D
 	
 	private TendrilHarpoon _harpoon;
 
+	// Rush-follow state
+	private int _rushFollowIndex;
+	private float _rushFollowTimer;
+	private int _rushFollowOriginSubX;
+	private int _rushFollowOriginSubY;
+	private readonly HashSet<(int X, int Y)> _rushFollowTrailCells = new();
+
+	// Rush dash state
+	private Vector2 _rushDashVelocity;
+	private float _rushDashAccumulator;
+
 	// Track which terrain tile we last entered (to trigger gameplay effects once per tile)
 	private int _lastTerrainX;
 	private int _lastTerrainY;
@@ -232,11 +291,10 @@ public partial class TendrilController : Node2D
 	//  SIGNALS
 	// =========================================================================
 
-	[Signal] public delegate void HungerChangedEventHandler(float current, float max);
 	[Signal] public delegate void TendrilMovedEventHandler(int x, int y);
 	[Signal] public delegate void RetreatStartedEventHandler();
 	[Signal] public delegate void RetreatEndedEventHandler();
-	[Signal] public delegate void TileConsumedEventHandler(int x, int y, float hungerGain);
+	[Signal] public delegate void TileConsumedEventHandler(int x, int y, float vigorGain);
 
 	// =========================================================================
 	//  LIFECYCLE
@@ -253,6 +311,15 @@ public partial class TendrilController : Node2D
 			return;
 		}
 
+		// Find TendrilVitality child component
+		Vitals = GetNode<TendrilVitality>("TendrilVitality");
+		if (Vitals == null)
+		{
+			GD.PrintErr("TendrilController: Missing TendrilVitality child node!");
+			return;
+		}
+		Vitals.VitalityDepleted += StartRetreat;
+
 		// Initialize blob noise for organic head shape
 		_blobNoise = new FastNoiseLite();
 		_blobNoise.NoiseType = FastNoiseLite.NoiseTypeEnum.Simplex;
@@ -266,7 +333,7 @@ public partial class TendrilController : Node2D
 		if (HarpoonPath != null)
 			_harpoon = GetNode<TendrilHarpoon>(HarpoonPath);
 
-		Hunger = MaxHunger;
+		Vitals.Reset();
 		CallDeferred(nameof(Initialize));
 	}
 
@@ -298,7 +365,7 @@ public partial class TendrilController : Node2D
 		_lastTerrainX = HeadX;
 		_lastTerrainY = HeadY;
 
-		Hunger = MaxHunger;
+		Vitals.Reset();
 		IsRetreating = false;
 		IsRegenerating = false;
 		_subTrail.Clear();
@@ -315,7 +382,6 @@ public partial class TendrilController : Node2D
 		PlaceBlob();
 		ClaimTerrainTile(HeadX, HeadY);
 
-		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
 		EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
 	}
 
@@ -341,14 +407,32 @@ public partial class TendrilController : Node2D
 			return;
 		}
 
-		// Passive hunger regen when stationary on corrupted land
-		if (_claimedTiles.Contains(PackCoords(HeadX, HeadY)))
-		{
-			Hunger = System.Math.Min(MaxHunger, Hunger + HungerRegenOnCorrupted * dt);
-			EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
-		}
+		// --- Vitality/Vigor/Connection (delegated to TendrilVitality) ---
+		bool onTree = _treeTiles.Contains(PackCoords(HeadX, HeadY));
+		bool onTerritory = _claimedTiles.Contains(PackCoords(HeadX, HeadY));
+		Vitals.Process(dt, onTree, onTerritory, CheckNetworkConnection);
 
-		if (_harpoon != null && _harpoon.IsActive)
+		if (IsRushDashing)
+		{
+			ProcessRushDash(dt);
+		}
+		else if (IsRushFollowing)
+		{
+			ProcessRushFollow(dt);
+		}
+		else if (IsRushHolding)
+		{
+			// Holding at harpoon tip — frozen, harpoon controls what happens next
+			_momentum = Vector2.Zero;
+			_moveAccumulator = Vector2.Zero;
+		}
+		else if (IsRetractFollowing)
+		{
+			// Following harpoon backward during retraction — movement driven by harpoon
+			_momentum = Vector2.Zero;
+			_moveAccumulator = Vector2.Zero;
+		}
+		else if (_harpoon != null && _harpoon.IsActive)
 		{
 			// Freeze: kill momentum so it doesn't resume after retract
 			_momentum = Vector2.Zero;
@@ -452,6 +536,7 @@ public partial class TendrilController : Node2D
 		// Guard against misconfiguration. Floor is much lower than the terrain-grid
 		// version because sub-steps are 4× smaller, so we need 4× more of them.
 		float effectiveMoveDelay = Mathf.Max(0.005f, MoveDelay * delayMultiplier);
+		effectiveMoveDelay /= SpeedMultiplier; // Vigor makes you faster
 		float stepsPerSecond = 1.0f / effectiveMoveDelay;
 		_moveAccumulator += _momentum * stepsPerSecond * dt;
 
@@ -527,6 +612,33 @@ public partial class TendrilController : Node2D
 		{
 			TileType centerTile = _chunkManager.GetTileAt(terrainX, terrainY);
 
+			// During rush dash, allow air traversal — land when hitting traversible solid
+			if (IsRushDashing)
+			{
+				if (centerTile == TileType.Air)
+				{
+					// Pass through air freely
+				}
+				else if (TileProperties.Is(centerTile, TileFlags.Liquid)
+					|| TileProperties.Is(centerTile, TileFlags.Hazardous))
+				{
+					return false;
+				}
+				else if (TileProperties.Is(centerTile, TileFlags.Solid)
+					&& !TileProperties.Is(centerTile, TileFlags.Breakable)
+					&& !_treeTiles.Contains(PackCoords(terrainX, terrainY)))
+				{
+					return false;
+				}
+				else
+				{
+					// Landed on traversible solid ground — claim tile and end dash
+					ClaimTerrainTile(terrainX, terrainY);
+					IsRushDashing = false;
+				}
+			}
+			else
+			{
 			// Can't move through air
 			if (centerTile == TileType.Air)
 				return false;
@@ -544,54 +656,11 @@ public partial class TendrilController : Node2D
 			if (TileProperties.Is(centerTile, TileFlags.Hazardous))
 				return false;
 
-			// Calculate hunger cost
-			bool isOwnTerritory = _claimedTiles.Contains(PackCoords(terrainX, terrainY));
-			bool isTreeTile = _treeTiles.Contains(PackCoords(terrainX, terrainY));
-			float cost;
-
-			if (isOwnTerritory)
-				cost = HungerOnCorrupted;
-			else if (isTreeTile)
-				cost = HungerOnCorrupted; // Tree is home — nearly free to traverse
-			else if (IsHardTile(centerTile))
-				cost = HungerPerHardMove;
-			else
-				cost = HungerPerMove;
-
-			if (Hunger - cost <= 0 && !isOwnTerritory && !isTreeTile)
-			{
-				StartRetreat();
-				return false;
-			}
-
-			// Calculate hunger gain from the terrain tile we're entering
-			float totalGain = 0f;
-			if (!_claimedTiles.Contains(PackCoords(terrainX, terrainY)))
-			{
-				TileType t = _chunkManager.GetTileAt(terrainX, terrainY);
-				totalGain = GetHungerGain(t);
-			}
-
-			// Apply hunger
-			Hunger = System.Math.Max(0, Hunger - cost);
-			Hunger = System.Math.Min(MaxHunger, Hunger + totalGain);
-
-			if (totalGain > 0)
-				EmitSignal(SignalName.TileConsumed, terrainX, terrainY, totalGain);
-
-			// Claim the new terrain tile
-			ClaimTerrainTile(terrainX, terrainY);
 
 			// Track distance for root spawning
 			TrackTravelAndSpawnRoots();
 
-			EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
-
-			if (Hunger <= 0)
-			{
-				StartRetreat();
-				return false;
-			}
+			} // end normal (non-dash) branch
 		}
 
 		// --- Move the sub-grid head ---
@@ -638,7 +707,7 @@ public partial class TendrilController : Node2D
 		int centerX = _subHeadX;
 		int centerY = _subHeadY;
 
-		int radius = BlobBaseRadius;
+		int radius = (int)(BlobBaseRadius * BlobSizeMultiplier);
 		int scanRange = radius + (int)BlobNoiseAmplitude + 2;
 
 		for (int dy = -scanRange; dy <= scanRange; dy++)
@@ -711,6 +780,8 @@ public partial class TendrilController : Node2D
 	private void StartRetreat()
 	{
 		if (IsRetreating) return;
+		CancelRushFollow();
+		IsRetractFollowing = false;
 		IsRetreating = true;
 		_retreatTimer = 0;
 		GD.Print("Tendril retreating!");
@@ -985,6 +1056,320 @@ public partial class TendrilController : Node2D
 	}
 
 	// =========================================================================
+	//  RUSH FOLLOW — creep along harpoon path to tip
+	// =========================================================================
+
+	/// <summary>
+	/// Begin creeping along the given path toward the harpoon tip.
+	/// Called by TendrilHarpoon when a creature is grabbed with throw unlocked.
+	/// </summary>
+	public void BeginRushFollow()
+	{
+		if (IsRetreating || IsRegenerating) return;
+		if (_harpoon == null) return;
+
+		_rushFollowOriginSubX = _subHeadX;
+		_rushFollowOriginSubY = _subHeadY;
+		_rushFollowIndex = 0;
+		_rushFollowTimer = 0f;
+		_rushFollowTrailCells.Clear();
+		IsRushFollowing = true;
+		IsRushHolding = false;
+		_momentum = Vector2.Zero;
+		_moveAccumulator = Vector2.Zero;
+	}
+
+	private void ProcessRushFollow(float dt)
+	{
+		if (_harpoon == null)
+		{
+			CancelRushFollow();
+			return;
+		}
+
+		var path = _harpoon.HarpoonPath;
+
+		// Harpoon fully retracted while we were following — cancel
+		if (!_harpoon.IsActive && path.Count == 0)
+		{
+			CancelRushFollow();
+			return;
+		}
+
+		// Already at or past the end of the current path
+		if (_rushFollowIndex >= path.Count)
+		{
+			// If harpoon is armed, we've arrived — enter holding
+			if (_harpoon.IsArmed)
+			{
+				IsRushFollowing = false;
+				IsRushHolding = true;
+			}
+			// Otherwise wait for the path to grow
+			return;
+		}
+
+		_rushFollowTimer -= dt;
+		if (_rushFollowTimer > 0f) return;
+		_rushFollowTimer = RushFollowStepDelay;
+
+		for (int i = 0; i < RushFollowSubStepsPerTick; i++)
+		{
+			if (_rushFollowIndex >= path.Count)
+			{
+				if (_harpoon.IsArmed)
+				{
+					IsRushFollowing = false;
+					IsRushHolding = true;
+				}
+				return;
+			}
+
+			var (targetSubX, targetSubY) = path[_rushFollowIndex];
+			_rushFollowIndex++;
+
+			foreach (var cell in _currentCoreCells)
+				_rushFollowTrailCells.Add(cell);
+
+			RushMoveToSub(targetSubX, targetSubY);
+		}
+	}
+
+	/// <summary>
+	/// Resolve rush hold — the controller stays at the tip.
+	/// Called when the player throws (commits to the position).
+	/// </summary>
+	public void ResolveRushHold()
+	{
+		IsRushFollowing = false;
+		IsRushHolding = false;
+		// Trail cells are kept for visual continuity during throw
+	}
+
+	/// <summary>
+	/// Clean up trail cells deposited during rush-follow.
+	/// Does NOT snap back — use when controller is already at final position (e.g. after rush chain).
+	/// </summary>
+	public void CleanupRushTrail()
+	{
+		foreach (var (cx, cy) in _rushFollowTrailCells)
+			SubGrid.ClearCell(cx, cy);
+		_rushFollowTrailCells.Clear();
+	}
+
+	/// <summary>
+	/// Clean up trail cells and snap controller back to pre-rush origin.
+	/// Use when the throw missed and controller needs to return.
+	/// </summary>
+	public void CleanupRushTrailAndReturn()
+	{
+		CleanupRushTrail();
+		RushMoveToSub(_rushFollowOriginSubX, _rushFollowOriginSubY);
+	}
+
+	/// <summary>
+	/// Cancel rush follow and snap back to the origin position.
+	/// Called on eat, retreat, or any cancellation.
+	/// </summary>
+	public void CancelRushFollow()
+	{
+		if (!IsRushFollowing && !IsRushHolding) return;
+
+		IsRushFollowing = false;
+		IsRushHolding = false;
+
+		// Clean up trail cells deposited during the rush-follow
+		foreach (var (cx, cy) in _rushFollowTrailCells)
+			SubGrid.ClearCell(cx, cy);
+		_rushFollowTrailCells.Clear();
+
+		// Snap back to where we were before the follow
+		RushMoveToSub(_rushFollowOriginSubX, _rushFollowOriginSubY);
+	}
+
+	/// <summary>
+	/// Begin following the harpoon backward during retraction.
+	/// Clears rush states but does NOT teleport — the controller will walk back.
+	/// </summary>
+	public void BeginRetractFollow()
+	{
+		// Track the tip blob cells — they weren't added to _rushFollowTrailCells
+		// during forward rush-follow (the last PlaceBlob's cells are only in _currentCoreCells)
+		foreach (var cell in _currentCoreCells)
+			_rushFollowTrailCells.Add(cell);
+
+		IsRushFollowing = false;
+		IsRushHolding = false;
+		IsRetractFollowing = true;
+		_momentum = Vector2.Zero;
+		_moveAccumulator = Vector2.Zero;
+	}
+
+	/// <summary>
+	/// Move the controller one step backward during harpoon retraction.
+	/// Clears the current blob and sweeps a radius to remove any forward-pass trail cells
+	/// that the differently-shaped retract blob wouldn't cover.
+	/// </summary>
+	public void RetractFollowStep(int targetSubX, int targetSubY)
+	{
+		if (!IsRetractFollowing) return;
+		if (_subHeadX == targetSubX && _subHeadY == targetSubY) return;
+
+		// Clear old core cells
+		foreach (var (x, y) in _currentCoreCells)
+			SubGrid.ClearCell(x, y);
+
+		// Sweep a generous radius around the old position to clear forward-pass
+		// trail cells that the retract blob shape wouldn't cover
+		SweepClearRushTrail(_subHeadX, _subHeadY);
+
+		_subHeadX = targetSubX;
+		_subHeadY = targetSubY;
+
+		var (terrainX, terrainY) = SubGridData.SubToTerrain(targetSubX, targetSubY);
+		_lastTerrainX = terrainX;
+		_lastTerrainY = terrainY;
+
+		PlaceBlob();
+		EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
+	}
+
+	/// <summary>
+	/// Clear all rush-follow trail cells within the blob radius of a position.
+	/// Uses the HashSet for O(1) lookups, bounded by the sweep area.
+	/// </summary>
+	private void SweepClearRushTrail(int centerSubX, int centerSubY)
+	{
+		int clearRadius = BlobBaseRadius + (int)BlobNoiseAmplitude + 2;
+		int clearRadiusSq = clearRadius * clearRadius;
+
+		for (int dy = -clearRadius; dy <= clearRadius; dy++)
+		{
+			for (int dx = -clearRadius; dx <= clearRadius; dx++)
+			{
+				if (dx * dx + dy * dy > clearRadiusSq) continue;
+
+				var pos = (centerSubX + dx, centerSubY + dy);
+				if (_rushFollowTrailCells.Remove(pos))
+					SubGrid.ClearCell(pos.Item1, pos.Item2);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Finish retract-follow: clean up remaining rush trail cells, restore origin, and re-place blob.
+	/// </summary>
+	public void FinishRetractFollow()
+	{
+		if (!IsRetractFollowing) return;
+		IsRetractFollowing = false;
+
+		// Clear the current blob (it's one step off from origin)
+		foreach (var (x, y) in _currentCoreCells)
+			SubGrid.ClearCell(x, y);
+
+		// Clean up any remaining rush-follow trail cells
+		foreach (var (cx, cy) in _rushFollowTrailCells)
+			SubGrid.ClearCell(cx, cy);
+		_rushFollowTrailCells.Clear();
+
+		// Restore controller to pre-rush origin and re-place the blob
+		_subHeadX = _rushFollowOriginSubX;
+		_subHeadY = _rushFollowOriginSubY;
+		var (terrainX, terrainY) = SubGridData.SubToTerrain(_subHeadX, _subHeadY);
+		_lastTerrainX = terrainX;
+		_lastTerrainY = terrainY;
+		PlaceBlob();
+		EmitSignal(SignalName.TendrilMoved, HeadX, HeadY);
+	}
+
+	// =========================================================================
+	//  RUSH DASH — momentum-based charge through air after throw collision
+	// =========================================================================
+
+	/// <summary>
+	/// Apply a momentum impulse in the given direction. The controller will fly
+	/// through air tiles and land on the first traversible solid block it enters.
+	/// Called by TendrilHarpoon on throw collision or rush chain trigger.
+	/// </summary>
+	public void ApplyRushImpulse(Vector2 direction, float distance)
+	{
+		if (IsRetreating || IsRegenerating) return;
+		if (direction.LengthSquared() < 0.0001f) return;
+
+		float impulse = RushDashBaseImpulse + distance * RushDashDistanceScale;
+		_rushDashVelocity = direction.Normalized() * impulse;
+		_rushDashAccumulator = 0f;
+		IsRushDashing = true;
+		_lastMoveDir = direction.Normalized();
+	}
+
+	private void ProcessRushDash(float dt)
+	{
+		// Apply drag
+		float speed = _rushDashVelocity.Length();
+		if (speed <= RushDashMinSpeed)
+		{
+			EndRushDash();
+			return;
+		}
+
+		_rushDashVelocity *= Mathf.Max(0f, 1f - RushDashDrag * dt);
+
+		// Accumulate sub-steps
+		_rushDashAccumulator += _rushDashVelocity.Length() * dt;
+
+		int steps = 0;
+		while (_rushDashAccumulator >= 1f && steps < RushDashMaxSubSteps)
+		{
+			_rushDashAccumulator -= 1f;
+			steps++;
+
+			Vector2 dir = _rushDashVelocity.Normalized();
+			int nextX = _subHeadX + (Mathf.Abs(dir.X) >= Mathf.Abs(dir.Y) ? System.Math.Sign(dir.X) : 0);
+			int nextY = _subHeadY + (Mathf.Abs(dir.Y) > Mathf.Abs(dir.X) ? System.Math.Sign(dir.Y) : 0);
+
+			// Try diagonal if both components are significant
+			if (Mathf.Abs(dir.X) > 0.3f && Mathf.Abs(dir.Y) > 0.3f)
+			{
+				nextX = _subHeadX + System.Math.Sign(dir.X);
+				nextY = _subHeadY + System.Math.Sign(dir.Y);
+			}
+
+			bool moved = TrySubMove(nextX, nextY);
+
+			if (!moved)
+			{
+				// Try axis-separated
+				if (TrySubMove(_subHeadX + System.Math.Sign(dir.X), _subHeadY))
+					moved = true;
+				else if (TrySubMove(_subHeadX, _subHeadY + System.Math.Sign(dir.Y)))
+					moved = true;
+			}
+
+			if (!moved)
+			{
+				// Fully blocked — end dash
+				EndRushDash();
+				return;
+			}
+
+			// IsRushDashing may have been cleared by TrySubMove landing on solid ground
+			if (!IsRushDashing)
+				return;
+		}
+	}
+
+	private void EndRushDash()
+	{
+		IsRushDashing = false;
+		_rushDashVelocity = Vector2.Zero;
+		_rushDashAccumulator = 0f;
+		_momentum = Vector2.Zero;
+		_moveAccumulator = Vector2.Zero;
+	}
+
+	// =========================================================================
 	//  INPUT
 	// =========================================================================
 
@@ -1037,65 +1422,81 @@ public partial class TendrilController : Node2D
 	}
 
 	// =========================================================================
-	//  HUNGER
+	//  NETWORK CONNECTION CHECK
 	// =========================================================================
 
-	private static float GetHungerGain(TileType tile)
+	/// <summary>
+	/// Check if the head can trace a path through sub-grid cells to the tree.
+	/// Uses BFS with a node cap to prevent frame spikes.
+	/// </summary>
+	private bool CheckNetworkConnection()
 	{
-		return tile switch
+		var queue = new Queue<long>();
+		var visited = new HashSet<long>();
+
+		// Start from cells adjacent to the head
+		for (int dy = -1; dy <= 1; dy++)
 		{
-			TileType.Dirt => 2.0f,
-			TileType.Sand => 1.0f,
-			TileType.Clay => 0.5f,
-			TileType.Leaf => 4.0f,
-			TileType.Roots => 6.0f,
-			TileType.RootTip => 8.0f,
+			for (int dx = -1; dx <= 1; dx++)
+			{
+				int sx = _subHeadX + dx;
+				int sy = _subHeadY + dy;
+				if (SubGrid.HasCell(sx, sy))
+				{
+					long key = SubGridData.PackCoords(sx, sy);
+					queue.Enqueue(key);
+					visited.Add(key);
+				}
+			}
+		}
 
-			TileType.GrassFloor or TileType.GrassCeiling
-			or TileType.GrassLWall or TileType.GrassRWall => 4.0f,
+		while (queue.Count > 0 && visited.Count < ConnectionBfsMaxNodes)
+		{
+			long key = queue.Dequeue();
+			var (x, y) = SubGridData.UnpackCoords(key);
 
-			TileType.GrassInnerTL or TileType.GrassInnerTR
-			or TileType.GrassInnerBL or TileType.GrassInnerBR => 4.0f,
+			// Check if this cell is on a tree tile
+			var (tileX, tileY) = SubGridData.SubToTerrain(x, y);
+			if (_treeTiles.Contains(PackCoords(tileX, tileY)))
+				return true;
 
-			TileType.GrassOuterTL or TileType.GrassOuterTR
-			or TileType.GrassOuterBL or TileType.GrassOuterBR => 4.0f,
+			// Expand to neighbors
+			for (int dy = -1; dy <= 1; dy++)
+			{
+				for (int dx = -1; dx <= 1; dx++)
+				{
+					if (dx == 0 && dy == 0) continue;
+					int nx = x + dx;
+					int ny = y + dy;
+					long nkey = SubGridData.PackCoords(nx, ny);
+					if (visited.Contains(nkey)) continue;
+					if (!SubGrid.HasCell(nx, ny)) continue;
 
-			TileType.BoneMarrow => 15.0f,
-			TileType.AncientSporeNode => 20.0f,
-			TileType.CrystalGrotte => 12.0f,
-			TileType.BioluminescentVein => 8.0f,
+					var cell = SubGrid.GetCell(nx, ny);
+					if (cell.State == SubCellState.Empty) continue;
 
-			TileType.Air => 0f,
+					visited.Add(nkey);
+					queue.Enqueue(nkey);
+				}
+			}
+		}
 
-			TileType.Mycelium or TileType.MyceliumDense
-			or TileType.MyceliumDark or TileType.MyceliumCore
-			or TileType.InfectedDirt => 0f,
-
-			_ when TileProperties.IsInfectedGrass(tile) => 0f,
-
-			_ => TileProperties.Is(tile, TileFlags.Organic) ? 1.0f : 0f,
-		};
+		return false;
 	}
+
+	/// <summary>Add vigor from any source. Delegates to TendrilVitality.</summary>
+	public void AddVigor(float amount) => Vitals.AddVigor(amount);
+
+	/// <summary>Damage vitality from external source. Delegates to TendrilVitality.</summary>
+	public void DamageVitality(float amount) => Vitals.DamageVitality(amount);
+
+	/// <summary>Returns the name of the current vigor tier.</summary>
+	public string GetVigorTierName() => Vitals.GetVigorTierName();
 
 	private static bool IsHardTile(TileType tile)
 	{
 		return tile == TileType.Clay || tile == TileType.Gravel
 			|| tile == TileType.Roots;
-	}
-
-	/// <summary>Add hunger from external source (e.g. consuming a creature).</summary>
-	public void AddHunger(float amount)
-	{
-		Hunger = System.Math.Min(MaxHunger, Hunger + amount);
-		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
-	}
-
-	/// <summary>Drain hunger from external source (e.g. creature attack).</summary>
-	public void DrainHunger(float amount)
-	{
-		Hunger = System.Math.Max(0, Hunger - amount);
-		EmitSignal(SignalName.HungerChanged, Hunger, MaxHunger);
-		if (Hunger <= 0) StartRetreat();
 	}
 
 	/// <summary>
@@ -1172,6 +1573,17 @@ public partial class TendrilController : Node2D
 			_subHeadX * cellSize + cellSize / 2f,
 			_subHeadY * cellSize + cellSize / 2f
 		);
+	}
+
+	/// <summary>
+	/// Position the camera should follow. Returns harpoon tip during extension,
+	/// otherwise returns the normal smooth head position.
+	/// </summary>
+	public Vector2 GetFocusPosition()
+	{
+		if (_harpoon != null && _harpoon.IsCameraTracking)
+			return _harpoon.GetTipPixelPosition();
+		return GetHeadPixelPositionSmooth();
 	}
 
 	/// <summary>

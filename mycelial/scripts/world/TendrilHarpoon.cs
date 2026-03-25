@@ -57,7 +57,6 @@ public partial class TendrilHarpoon : Node
 	[Export] public int RetractSubStepsPerTick = 6;
 
 	// --- Cost ---
-	[Export] public float HungerCost = 5f;
 	[Export] public int CaveDetectRadius = 3;
 
 	// --- Input ---
@@ -98,8 +97,6 @@ public partial class TendrilHarpoon : Node
 	// --- Rush Chain Config ---
 	[Export] public bool EnableRushChain = true;
 	[Export] public float RushStunDuration = 1.0f;
-	[Export] public int RushSearchDistanceBlocks = 20;
-	[Export] public float RushSpeed = 260f;
 	[Export] public int RushConsumeRadius = 5;
 	[Export] public int RushDamageToNonStunned = 2;
 	[Export] public float RushKnockback = 75f;
@@ -155,11 +152,7 @@ public partial class TendrilHarpoon : Node
 	private float _projStepAccumulator;
 
 	// Rush chain state
-	private float _rushX, _rushY;
-	private int _rushSubX, _rushSubY;
-	private int _rushAnchorSubX, _rushAnchorSubY;
 	private Vector2 _rushDirection;
-	private float _rushStepAccumulator;
 	private readonly HashSet<Creature> _rushProcessed = new();
 
 	// Input state
@@ -167,6 +160,9 @@ public partial class TendrilHarpoon : Node
 	private bool _wasTriggerHeld;
 	private bool _wasEatKeyHeld;
 	private bool _wasLeftTriggerHeld;
+
+	// Armed throw tracking — requires new fire press+release cycle
+	private bool _armedFireEngaged;
 
 	// --- Signals ---
 	[Signal] public delegate void ChargeStartedEventHandler();
@@ -209,6 +205,36 @@ public partial class TendrilHarpoon : Node
 
 	/// <summary>True when throw branch is available to the player.</summary>
 	public bool IsThrowAvailable => ThrowUnlocked && ThrowEnabled;
+
+	/// <summary>True when the camera should track the harpoon tip (extending or retracting).</summary>
+	public bool IsCameraTracking => _state == HarpoonState.Straight
+		|| _state == HarpoonState.Guided
+		|| _state == HarpoonState.Retracting;
+
+	/// <summary>Get the harpoon tip position in world pixels.</summary>
+	public Vector2 GetTipPixelPosition()
+	{
+		int cellSize = WorldConfig.SubCellSize;
+		// During retraction the tip is the last remaining path element
+		if (_harpoonPath.Count > 0)
+		{
+			var (tx, ty) = _harpoonPath[^1];
+			return new Vector2(
+				tx * cellSize + cellSize / 2f,
+				ty * cellSize + cellSize / 2f
+			);
+		}
+		return new Vector2(
+			_currentSubX * cellSize + cellSize / 2f,
+			_currentSubY * cellSize + cellSize / 2f
+		);
+	}
+
+	/// <summary>The creature currently held by the harpoon (null when none).</summary>
+	public Creature GrabbedCreature => _grabbedCreature;
+
+	/// <summary>The live harpoon path for rush-follow tracking.</summary>
+	public IReadOnlyList<(int SubX, int SubY)> HarpoonPath => _harpoonPath;
 
 	public override void _Ready()
 	{
@@ -277,7 +303,6 @@ public partial class TendrilHarpoon : Node
 	{
 		if (!IsFireInputPressed()) return;
 		if (!IsNearCave()) return;
-		if (_tendril.Hunger < HungerCost) return;
 
 		_state = HarpoonState.Winding;
 		_windTimer = 0f;
@@ -307,6 +332,7 @@ public partial class TendrilHarpoon : Node
 		_harpoonPath.Clear();
 		_stepTimer = 0f;
 		_grabbedCreature = null;
+		_armedFireEngaged = false;
 
 		_ddaX = _tendril.SubHeadX + 0.5f;
 		_ddaY = _tendril.SubHeadY + 0.5f;
@@ -317,7 +343,7 @@ public partial class TendrilHarpoon : Node
 		_lastCheckedTerrainX = tx;
 		_lastCheckedTerrainY = ty;
 
-		_tendril.DrainHunger(HungerCost);
+		// Harpoon is free to fire — vigor decay while not eating is the cost
 	}
 
 	private void FireStraight()
@@ -327,12 +353,16 @@ public partial class TendrilHarpoon : Node
 			_shotDirection = new Vector2(0, 1);
 		_shotDirection = _shotDirection.Normalized();
 
-		_targetRange = TapRange;
+		_targetRange = (int)(TapRange * _tendril.HarpoonRangeMultiplier);
 		_stepsPerTick = TapSubStepsPerTick;
 
 		InitializeShot();
 
 		_state = HarpoonState.Straight;
+
+		if (IsThrowAvailable)
+			_tendril?.BeginRushFollow();
+
 		EmitSignal(SignalName.HarpoonFired, _targetRange);
 	}
 
@@ -343,12 +373,16 @@ public partial class TendrilHarpoon : Node
 			_shotDirection = new Vector2(0, 1);
 		_shotDirection = _shotDirection.Normalized();
 
-		_targetRange = GuidedMaxRange;
+		_targetRange = (int)(GuidedMaxRange * _tendril.HarpoonRangeMultiplier);
 		_stepsPerTick = GuidedSubStepsPerTick;
 
 		InitializeShot();
 
 		_state = HarpoonState.Guided;
+
+		if (IsThrowAvailable)
+			_tendril?.BeginRushFollow();
+
 		EmitSignal(SignalName.HarpoonFired, _targetRange);
 	}
 
@@ -430,9 +464,6 @@ public partial class TendrilHarpoon : Node
 			TriggerGrabPulse(hitCreature, newSubX, newSubY);
 			EmitSignal(SignalName.CreatureGrabbed, hitCreature.SubX, hitCreature.SubY);
 
-			if (IsThrowAvailable)
-				RushTendrilToCaughtCreature(newSubX, newSubY);
-
 			if (!IsThrowAvailable)
 			{
 				GD.Print($"Harpoon grabbed {hitCreature.Species} — throw disabled, auto-consume.");
@@ -440,19 +471,10 @@ public partial class TendrilHarpoon : Node
 				return false;
 			}
 
-			// KEY DECISION: is fire still held?
-			if (IsFireInputHeld())
-			{
-				// Player is holding → enter Armed state, don't retract
-				_state = HarpoonState.Armed;
-				GD.Print($"Harpoon grabbed {hitCreature.Species} — ARMED! Aim and release to throw.");
-			}
-			else
-			{
-				// Player already released → normal retract + consume
-				GD.Print($"Harpoon grabbed {hitCreature.Species} — retracting to consume.");
-				StartRetract();
-			}
+			// Throw is available — always enter Armed (player decides eat vs throw)
+			_armedFireEngaged = false;
+			_state = HarpoonState.Armed;
+			GD.Print($"Harpoon grabbed {hitCreature.Species} — ARMED! Hold+release R2 to throw, L2/E to eat.");
 			return false;
 		}
 
@@ -503,30 +525,36 @@ public partial class TendrilHarpoon : Node
 			_creatureManager?.ForceCreatureSubPosition(_grabbedCreature, tipX, tipY);
 		}
 
-		// Explicit consume input while armed.
-		if (IsFireInputHeld() && IsConsumeInputPressed())
+		// Wait for the controller to arrive before allowing eat/throw
+		if (_tendril != null && _tendril.IsRushFollowing)
+			return;
+
+		// Controller has arrived at the tip — player can now act
+
+		// Eat: L2/E at any time (no need to hold fire)
+		if (IsConsumeInputPressed())
 		{
-			GD.Print($"Harpoon consumed {_grabbedCreature.Species} via L2/E.");
+			GD.Print($"Harpoon: eat {_grabbedCreature.Species} — retracting.");
 			StartRetract();
 			return;
 		}
 
-		// Player releases fire → THROW in aimed direction
-		if (!IsFireInputHeld())
+		// Throw: requires a NEW fire press+release cycle
+		// (prevents auto-throw when fire was held from the original shot)
+		if (IsFireInputHeld())
+			_armedFireEngaged = true;
+
+		if (_armedFireEngaged && !IsFireInputHeld())
 		{
-			// Get aim direction from movement input
 			Vector2 aimDir = GetSteerInputVector();
 
 			if (aimDir.LengthSquared() < 0.01f)
-			{
-				// No aim input — use the harpoon's current direction
 				aimDir = _shotDirection;
-			}
 			else
-			{
 				aimDir = aimDir.Normalized();
-			}
 
+			// Controller stays at tip — committed to the throw
+			_tendril?.ResolveRushHold();
 			LaunchCreature(aimDir);
 			return;
 		}
@@ -656,7 +684,7 @@ public partial class TendrilHarpoon : Node
 
 				if (TryStartRushFromCollision(_projSubX, _projSubY, _throwDirection))
 				{
-					GD.Print($"RUSH CHAIN! Anchor at ({_rushAnchorSubX},{_rushAnchorSubY})");
+					GD.Print("RUSH CHAIN! Momentum dash started.");
 					return true;
 				}
 
@@ -683,9 +711,9 @@ public partial class TendrilHarpoon : Node
 			if (targetDied)
 			{
 				var targetConfig = CreatureRegistry.GetConfig(other.Species);
-				_tendril.AddHunger(targetConfig.HungerOnConsume);
+				_tendril.AddVigor(targetConfig.VigorOnConsume + _tendril.VigorGainSlamKill);
 				_particles?.SpawnBurst(other, _projSubX, _projSubY);
-				GD.Print($"SLAM KILL! {_grabbedCreature.Species} → {other.Species}! +{targetConfig.HungerOnConsume} hunger");
+				GD.Print($"SLAM KILL! {_grabbedCreature.Species} → {other.Species}! +{targetConfig.VigorOnConsume + _tendril.VigorGainSlamKill} vigor");
 			}
 			else
 			{
@@ -698,7 +726,7 @@ public partial class TendrilHarpoon : Node
 			if (projDied)
 			{
 				var projConfig = CreatureRegistry.GetConfig(_grabbedCreature.Species);
-				_tendril.AddHunger(projConfig.HungerOnConsume * 0.5f);
+				_tendril.AddVigor(projConfig.VigorOnConsume * 0.5f);
 				_particles?.SpawnBurst(_grabbedCreature, _projSubX, _projSubY);
 				_creatureManager.KillCreatureExternal(_grabbedCreature);
 			}
@@ -724,7 +752,7 @@ public partial class TendrilHarpoon : Node
 		if (TileProperties.Is(tile, TileFlags.Organic) && !TileProperties.Is(tile, TileFlags.Solid))
 			return false;
 
-		// WALL SPLAT
+		// WALL SPLAT — damage the thrown creature
 		_particles?.SpawnBurst(_grabbedCreature, _projSubX, _projSubY);
 
 		bool died = _creatureManager.DamageCreature(_grabbedCreature, SlamSelfDamage + WallSplatExtraDamage);
@@ -732,17 +760,24 @@ public partial class TendrilHarpoon : Node
 		if (died)
 		{
 			var config = CreatureRegistry.GetConfig(_grabbedCreature.Species);
-			_tendril.AddHunger(config.HungerOnConsume * 0.25f);
+			_tendril.AddVigor(config.VigorOnConsume * 0.25f);
 			_creatureManager.KillCreatureExternal(_grabbedCreature);
 			GD.Print($"SPLAT! {_grabbedCreature.Species} hit a wall!");
 		}
 		else
 		{
-			_creatureManager.ApplyImpulse(_grabbedCreature, _throwDirection * -20f);
-			GD.Print($"{_grabbedCreature.Species} hit a wall but survived!");
+			_creatureManager.StunCreature(_grabbedCreature, RushStunDuration);
+			GD.Print($"{_grabbedCreature.Species} hit a wall — stunned!");
 		}
 
 		EmitSignal(SignalName.WallSplat, _projSubX, _projSubY);
+
+		// Try rush chain toward a solid anchor behind the wall
+		if (EnableRushChain && TryStartRushFromCollision(_projSubX, _projSubY, _throwDirection))
+		{
+			GD.Print("WALL RUSH! Momentum dash started.");
+			return true;
+		}
 
 		FinishThrow();
 		return true;
@@ -752,8 +787,15 @@ public partial class TendrilHarpoon : Node
 	{
 		if (_grabbedCreature != null && _grabbedCreature.IsAlive)
 		{
-			_creatureManager.ApplyImpulse(_grabbedCreature, _throwDirection * 15f);
-			GD.Print($"Threw {_grabbedCreature.Species} — missed!");
+			_creatureManager.StunCreature(_grabbedCreature, RushStunDuration);
+			GD.Print($"Threw {_grabbedCreature.Species} — missed, stunned on landing.");
+		}
+
+		// Try rush even on a miss — if there's a wall ahead the tendril can rush to
+		if (EnableRushChain && TryStartRushFromCollision(_projSubX, _projSubY, _throwDirection))
+		{
+			GD.Print("MISS RUSH! Momentum dash started.");
+			return;
 		}
 
 		FinishThrow();
@@ -761,151 +803,25 @@ public partial class TendrilHarpoon : Node
 
 	private bool TryStartRushFromCollision(int collisionSubX, int collisionSubY, Vector2 rushDirection)
 	{
-		if (_creatureManager == null || _tendril == null) return false;
+		if (_tendril == null) return false;
 		if (rushDirection.LengthSquared() < 0.0001f) return false;
 
-		if (!TryFindRushAnchor(collisionSubX, collisionSubY, rushDirection.Normalized(), out int anchorSubX, out int anchorSubY))
-			return false;
+		// Calculate distance from controller to collision for impulse scaling
+		int dx = collisionSubX - _tendril.SubHeadX;
+		int dy = collisionSubY - _tendril.SubHeadY;
+		float distance = Mathf.Sqrt(dx * dx + dy * dy);
 
-		_rushX = collisionSubX;
-		_rushY = collisionSubY;
-		_rushSubX = collisionSubX;
-		_rushSubY = collisionSubY;
-		_rushAnchorSubX = anchorSubX;
-		_rushAnchorSubY = anchorSubY;
-		_rushDirection = (new Vector2(anchorSubX - collisionSubX, anchorSubY - collisionSubY)).Normalized();
-		_rushStepAccumulator = 0f;
+		_rushDirection = rushDirection.Normalized();
 		_rushProcessed.Clear();
 
-		ApplyRushInteractionsAt(_rushSubX, _rushSubY);
+		// Apply interactions at the collision point
+		ApplyRushInteractionsAt(collisionSubX, collisionSubY);
+
+		// Give the controller a momentum impulse
+		_tendril.ApplyRushImpulse(_rushDirection, distance);
 
 		_grabbedCreature = null;
 		_state = HarpoonState.Rushing;
-		return true;
-	}
-
-	private bool TryFindRushAnchor(int startSubX, int startSubY, Vector2 direction, out int anchorSubX, out int anchorSubY)
-	{
-		anchorSubX = 0;
-		anchorSubY = 0;
-
-		int maxSubSteps = Math.Max(1, RushSearchDistanceBlocks * WorldConfig.SubGridScale);
-		float scanX = startSubX + 0.5f;
-		float scanY = startSubY + 0.5f;
-
-		int lastTileX = int.MinValue;
-		int lastTileY = int.MinValue;
-
-		for (int i = 0; i < maxSubSteps; i++)
-		{
-			scanX += direction.X;
-			scanY += direction.Y;
-
-			int subX = Mathf.FloorToInt(scanX);
-			int subY = Mathf.FloorToInt(scanY);
-			var (tileX, tileY) = SubGridData.SubToTerrain(subX, subY);
-
-			if (tileX == lastTileX && tileY == lastTileY)
-				continue;
-
-			lastTileX = tileX;
-			lastTileY = tileY;
-
-			TileType tile = _chunkManager.GetTileAt(tileX, tileY);
-			if (!IsTraversibleRushDestinationTile(tile))
-				continue;
-
-			anchorSubX = tileX * WorldConfig.SubGridScale + WorldConfig.SubGridScale / 2;
-			anchorSubY = tileY * WorldConfig.SubGridScale + WorldConfig.SubGridScale / 2;
-			return true;
-		}
-
-		return false;
-	}
-
-	private static bool IsTraversibleRushDestinationTile(TileType tile)
-	{
-		if (tile == TileType.Air)
-			return false;
-
-		if (TileProperties.Is(tile, TileFlags.Liquid) || TileProperties.Is(tile, TileFlags.Hazardous))
-			return false;
-
-		// Mirror the tendril's blocked-solid rule (excluding special tree exceptions).
-		if (TileProperties.Is(tile, TileFlags.Solid) && !TileProperties.Is(tile, TileFlags.Breakable))
-			return false;
-
-		return true;
-	}
-
-	private void RushTendrilToCaughtCreature(int caughtSubX, int caughtSubY)
-	{
-		if (_tendril == null || _chunkManager == null) return;
-
-		if (!TryFindNearestTraversibleSubAlongLine(
-			_tendril.SubHeadX,
-			_tendril.SubHeadY,
-			caughtSubX,
-			caughtSubY,
-			out int targetSubX,
-			out int targetSubY))
-		{
-			return;
-		}
-
-		_tendril.RushMoveToSub(targetSubX, targetSubY);
-	}
-
-	private bool TryFindNearestTraversibleSubAlongLine(
-		int fromSubX,
-		int fromSubY,
-		int toSubX,
-		int toSubY,
-		out int resultSubX,
-		out int resultSubY)
-	{
-		resultSubX = fromSubX;
-		resultSubY = fromSubY;
-
-		Vector2 dir = new Vector2(toSubX - fromSubX, toSubY - fromSubY);
-		if (dir.LengthSquared() < 0.001f)
-			return false;
-
-		dir = dir.Normalized();
-		float x = fromSubX + 0.5f;
-		float y = fromSubY + 0.5f;
-
-		int maxSteps = Math.Max(Math.Abs(toSubX - fromSubX), Math.Abs(toSubY - fromSubY));
-		maxSteps = Math.Max(1, maxSteps);
-
-		int bestX = fromSubX;
-		int bestY = fromSubY;
-		bool found = false;
-
-		for (int i = 0; i < maxSteps; i++)
-		{
-			x += dir.X;
-			y += dir.Y;
-
-			int subX = Mathf.FloorToInt(x);
-			int subY = Mathf.FloorToInt(y);
-			var (tileX, tileY) = SubGridData.SubToTerrain(subX, subY);
-			TileType tile = _chunkManager.GetTileAt(tileX, tileY);
-
-			if (IsTraversibleRushDestinationTile(tile))
-			{
-				bestX = subX;
-				bestY = subY;
-				found = true;
-			}
-		}
-
-		if (!found)
-			return false;
-
-		resultSubX = bestX;
-		resultSubY = bestY;
-
 		return true;
 	}
 
@@ -913,39 +829,16 @@ public partial class TendrilHarpoon : Node
 	{
 		RetractLineStep(dt);
 
-		_rushStepAccumulator += RushSpeed * dt;
-		int steps = 0;
+		// Movement is handled by the controller's momentum system.
+		// Check for creature interactions at the controller's current position.
+		if (_tendril != null)
+			ApplyRushInteractionsAt(_tendril.SubHeadX, _tendril.SubHeadY);
 
-		while (_rushStepAccumulator >= 1f && steps < 20)
+		// Rush ends when the controller's dash is done
+		if (_tendril == null || !_tendril.IsRushDashing)
 		{
-			_rushStepAccumulator -= 1f;
-			steps++;
-
-			_rushX += _rushDirection.X;
-			_rushY += _rushDirection.Y;
-
-			int newSubX = Mathf.FloorToInt(_rushX);
-			int newSubY = Mathf.FloorToInt(_rushY);
-
-			if (newSubX == _rushSubX && newSubY == _rushSubY)
-				continue;
-
-			_rushSubX = newSubX;
-			_rushSubY = newSubY;
-
-			_tendril.RushMoveToSub(_rushSubX, _rushSubY);
-			ApplyRushInteractionsAt(_rushSubX, _rushSubY);
-
-			bool reachedX = (_rushDirection.X >= 0f && _rushSubX >= _rushAnchorSubX)
-				|| (_rushDirection.X < 0f && _rushSubX <= _rushAnchorSubX);
-			bool reachedY = (_rushDirection.Y >= 0f && _rushSubY >= _rushAnchorSubY)
-				|| (_rushDirection.Y < 0f && _rushSubY <= _rushAnchorSubY);
-
-			if (reachedX && reachedY)
-			{
-				FinishRush();
-				return;
-			}
+			FinishRush();
+			return;
 		}
 	}
 
@@ -967,7 +860,7 @@ public partial class TendrilHarpoon : Node
 			if (creature.IsStunned)
 			{
 				var config = CreatureRegistry.GetConfig(creature.Species);
-				_tendril.AddHunger(config.HungerOnConsume);
+				_tendril.AddVigor(config.VigorOnConsume);
 				_particles?.SpawnBurst(creature, rushSubX, rushSubY);
 				_creatureManager.KillCreatureExternal(creature);
 				_rushProcessed.Add(creature);
@@ -993,7 +886,7 @@ public partial class TendrilHarpoon : Node
 	private void FinishRush()
 	{
 		_rushProcessed.Clear();
-		_rushStepAccumulator = 0f;
+		_tendril?.CleanupRushTrail();
 
 		if (_harpoonPath.Count > 0)
 			_state = HarpoonState.Retracting;
@@ -1004,6 +897,9 @@ public partial class TendrilHarpoon : Node
 	private void FinishThrow()
 	{
 		_grabbedCreature = null;
+
+		// Clean up rush trail and snap controller back to origin
+		_tendril?.CleanupRushTrailAndReturn();
 
 		// If harpoon line is still retracting, let it finish
 		if (_harpoonPath.Count > 0)
@@ -1075,6 +971,10 @@ public partial class TendrilHarpoon : Node
 
 	private void StartRetract()
 	{
+		// Smooth retract-follow when the controller has moved along the harpoon
+		if (_tendril != null && (_tendril.IsRushFollowing || _tendril.IsRushHolding))
+			_tendril.BeginRetractFollow();
+
 		_state = HarpoonState.Retracting;
 		_stepTimer = 0f;
 	}
@@ -1096,6 +996,13 @@ public partial class TendrilHarpoon : Node
 			var (rx, ry) = _harpoonPath[^1];
 			_harpoonPath.RemoveAt(_harpoonPath.Count - 1);
 			ClearHarpoonCell(rx, ry);
+
+			// Move controller backward along the harpoon path
+			if (_tendril != null && _tendril.IsRetractFollowing && _harpoonPath.Count > 0)
+			{
+				var (tipX, tipY) = _harpoonPath[^1];
+				_tendril.RetractFollowStep(tipX, tipY);
+			}
 
 			// Drag creature along during retract
 			if (_grabbedCreature != null && _grabbedCreature.IsAlive && _harpoonPath.Count > 0)
@@ -1146,7 +1053,7 @@ public partial class TendrilHarpoon : Node
 			if (targetDied)
 			{
 				var config = CreatureRegistry.GetConfig(other.Species);
-				_tendril.AddHunger(config.HungerOnConsume);
+				_tendril.AddVigor(config.VigorOnConsume + _tendril.VigorGainSlamKill);
 				_particles?.SpawnBurst(other, projectileSubX, projectileSubY);
 				GD.Print($"RETRACT SLAM! {_grabbedCreature.Species} killed {other.Species}!");
 			}
@@ -1156,7 +1063,7 @@ public partial class TendrilHarpoon : Node
 			if (projectileDied)
 			{
 				var projConfig = CreatureRegistry.GetConfig(_grabbedCreature.Species);
-				_tendril.AddHunger(projConfig.HungerOnConsume);
+				_tendril.AddVigor(projConfig.VigorOnConsume);
 				_particles?.SpawnBurst(_grabbedCreature, projectileSubX, projectileSubY);
 				_creatureManager.KillCreatureExternal(_grabbedCreature);
 				_grabbedCreature = null;
@@ -1193,11 +1100,14 @@ public partial class TendrilHarpoon : Node
 		{
 			// Normal retract with creature → consume it
 			var config = CreatureRegistry.GetConfig(_grabbedCreature.Species);
-			_tendril.AddHunger(config.HungerOnConsume);
+			_tendril.AddVigor(config.VigorOnConsume + _tendril.VigorGainHarpoonCatch);
 			_particles?.SpawnBurst(_grabbedCreature, _tendril.SubHeadX, _tendril.SubHeadY);
 			_creatureManager?.KillCreatureExternal(_grabbedCreature);
-			GD.Print($"Consumed {_grabbedCreature.Species}! +{config.HungerOnConsume} hunger");
+			GD.Print($"Consumed {_grabbedCreature.Species}! +{config.VigorOnConsume + _tendril.VigorGainHarpoonCatch} vigor");
 		}
+
+		// Finish the controller's retract-follow if it was active
+		_tendril?.FinishRetractFollow();
 
 		_grabbedCreature = null;
 		_harpoonPath.Clear();
@@ -1211,6 +1121,10 @@ public partial class TendrilHarpoon : Node
 	/// </summary>
 	private void CancelAndCleanup()
 	{
+		// Cancel rush-follow or retract-follow if active
+		_tendril?.CancelRushFollow();
+		_tendril?.FinishRetractFollow();
+
 		// Clear all harpoon cells
 		foreach (var (rx, ry) in _harpoonPath)
 			ClearHarpoonCell(rx, ry);
@@ -1227,7 +1141,6 @@ public partial class TendrilHarpoon : Node
 		_pulseCreature = null;
 		_grabPulseTimer = 0f;
 		_rushProcessed.Clear();
-		_rushStepAccumulator = 0f;
 		_state = HarpoonState.Idle;
 	}
 

@@ -32,7 +32,8 @@ public partial class TendrilDebugOverlay : CanvasLayer
 	private Label _speedLabel;
 	private Label _headingLabel;
 	private Label _tileLabel;
-	private Label _hungerLabel;
+	private Label _vitalityLabel;
+	private Label _vigorLabel;
 	private Label _slidingLabel;
 	private Label _infectedLabel;
 	private Label _throwModeLabel;
@@ -73,7 +74,8 @@ public partial class TendrilDebugOverlay : CanvasLayer
 		_speedLabel.Text = $"Speed: {_head.Speed:F0} px/s";
 		_headingLabel.Text = $"Heading: {Mathf.RadToDeg(_head.Heading):F0}\u00b0";
 		_tileLabel.Text = $"Tile: ({_head.CurrentTile.X}, {_head.CurrentTile.Y})";
-		_hungerLabel.Text = $"Hunger: {_controller.Hunger:F0} / {_controller.MaxHunger:F0}";
+		_vitalityLabel.Text = $"Vitality: {_controller.Vitality:F0} / {_controller.MaxVitality:F0}";
+		_vigorLabel.Text = $"Vigor: {_controller.Vigor:F0} / {_controller.MaxVigor:F0} ({_controller.GetVigorTierName()})";
 		_slidingLabel.Text = _head.IsSlidingAlongWall ? "WALL SLIDE" : "";
 		_infectedLabel.Text = $"Claimed: {_controller.ClaimedTileCount}";
 
@@ -129,7 +131,8 @@ public partial class TendrilDebugOverlay : CanvasLayer
 		_speedLabel = AddLabel("Speed: 0");
 		_headingLabel = AddLabel("Heading: 0\u00b0");
 		_tileLabel = AddLabel("Tile: (0, 0)");
-		_hungerLabel = AddLabel("Hunger: 100 / 100");
+		_vitalityLabel = AddLabel("Vitality: 100 / 100");
+		_vigorLabel = AddLabel("Vigor: 30 / 100");
 		_infectedLabel = AddLabel("Claimed: 0");
 		_throwModeLabel = AddLabel("Throw: N/A");
 		_slidingLabel = AddLabel("");

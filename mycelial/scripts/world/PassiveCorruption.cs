@@ -153,7 +153,8 @@ public partial class PassiveCorruption : Node2D
 		if (_frontier.Count == 0) return;
 
 		SubGridData subGrid = _tendril.SubGrid;
-		int count = System.Math.Min(SpreadsPerTick, _frontier.Count);
+		int count = (int)(SpreadsPerTick * _tendril.CorruptionSpeedMultiplier);
+		count = System.Math.Min(count, _frontier.Count);
 
 		for (int i = 0; i < count; i++)
 		{

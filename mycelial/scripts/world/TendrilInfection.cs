@@ -97,13 +97,13 @@ public partial class TendrilInfection : Node2D
 
 	/// <summary>
 	/// Process infection for the current head position.
-	/// Returns total hunger gained this frame.
+	/// Returns total vigor gained this frame.
 	/// </summary>
 	public float Update(float delta, Vector2 headPosition, float speed)
 	{
 		if (_chunkManager == null) return 0f;
 
-		float hungerGained = 0f;
+		float vigorGained = 0f;
 		int ts = WorldConfig.TileSize;
 
 		int headTileX = Mathf.FloorToInt(headPosition.X / ts);
@@ -114,7 +114,7 @@ public partial class TendrilInfection : Node2D
 		{
 			long entryKey = PackCoords(headTileX, headTileY);
 			if (!_fullyInfected.Contains(entryKey))
-				hungerGained += AddExposure(entryKey, headTileX, headTileY, EntryExposureBonus);
+				vigorGained += AddExposure(entryKey, headTileX, headTileY, EntryExposureBonus);
 
 			_lastEnteredTile = (headTileX, headTileY);
 		}
@@ -144,14 +144,14 @@ public partial class TendrilInfection : Node2D
 				proximity *= proximity;
 
 				float exposure = BaseExposureRate * proximity * delta;
-				hungerGained += AddExposure(key, tx, ty, exposure);
+				vigorGained += AddExposure(key, tx, ty, exposure);
 			}
 		}
 
 		if (_infectionProgress.Count > MaxTrackedTiles)
 			PruneOldestPartials();
 
-		return hungerGained;
+		return vigorGained;
 	}
 
 	// =========================================================================
@@ -219,7 +219,7 @@ public partial class TendrilInfection : Node2D
 		TotalInfected++;
 		EmitSignal(SignalName.TileInfected, tileX, tileY, (int)trueOriginal);
 
-		return GetHungerGain(trueOriginal);
+		return GetVigorGain(trueOriginal);
 	}
 
 	private void RecordOriginal(long key, TileType tile)
@@ -253,32 +253,32 @@ public partial class TendrilInfection : Node2D
 		return true;
 	}
 
-	private static float GetHungerGain(TileType tile)
+	private static float GetVigorGain(TileType tile)
 	{
 		return tile switch
 		{
-			TileType.Dirt => 2.0f,
-			TileType.Sand => 1.0f,
-			TileType.Clay => 0.5f,
-			TileType.Leaf => 4.0f,
-			TileType.Roots => 6.0f,
-			TileType.RootTip => 8.0f,
+			TileType.Dirt => 0.5f,
+			TileType.Sand => 0.25f,
+			TileType.Clay => 0.15f,
+			TileType.Leaf => 1.0f,
+			TileType.Roots => 1.5f,
+			TileType.RootTip => 2.0f,
 
 			TileType.GrassFloor or TileType.GrassCeiling
-				or TileType.GrassLWall or TileType.GrassRWall => 4.0f,
+				or TileType.GrassLWall or TileType.GrassRWall => 1.0f,
 			TileType.GrassInnerTL or TileType.GrassInnerTR
-				or TileType.GrassInnerBL or TileType.GrassInnerBR => 4.0f,
+				or TileType.GrassInnerBL or TileType.GrassInnerBR => 1.0f,
 			TileType.GrassOuterTL or TileType.GrassOuterTR
-				or TileType.GrassOuterBL or TileType.GrassOuterBR => 4.0f,
+				or TileType.GrassOuterBL or TileType.GrassOuterBR => 1.0f,
 
-			TileType.BoneMarrow => 15.0f,
-			TileType.AncientSporeNode => 20.0f,
-			TileType.CrystalGrotte => 12.0f,
-			TileType.BioluminescentVein => 8.0f,
+			TileType.BoneMarrow => 4.0f,
+			TileType.AncientSporeNode => 5.0f,
+			TileType.CrystalGrotte => 3.0f,
+			TileType.BioluminescentVein => 2.0f,
 
 			TileType.MyceliumDense or TileType.MyceliumDark => 0f,
 
-			_ => TileProperties.Is(tile, TileFlags.Organic) ? 1.0f : 0f,
+			_ => TileProperties.Is(tile, TileFlags.Organic) ? 0.25f : 0f,
 		};
 	}
 

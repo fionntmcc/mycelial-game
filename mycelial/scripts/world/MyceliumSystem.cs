@@ -24,6 +24,7 @@ using Mycorrhiza.Data;
 public partial class MyceliumSystem : Node2D
 {
 	[Export] public NodePath ChunkManagerPath { get; set; }
+	[Export] public NodePath TendrilControllerPath { get; set; }
 	[Export] public bool EnableAutonomousSpread = false;
 
 	// --- Tunable Parameters ---
@@ -42,6 +43,7 @@ public partial class MyceliumSystem : Node2D
 
 	// --- State ---
 	private ChunkManager _chunkManager;
+	private TendrilController _tendril;
 	private float _timer;
 
 	// The frontier — tiles that are candidates for becoming mycelium next.
@@ -73,6 +75,8 @@ public partial class MyceliumSystem : Node2D
 	{
 		if (ChunkManagerPath != null)
 			_chunkManager = GetNode<ChunkManager>(ChunkManagerPath);
+		if (TendrilControllerPath != null)
+			_tendril = GetNode<TendrilController>(TendrilControllerPath);
 
 		if (_chunkManager == null)
 		{
@@ -186,6 +190,11 @@ public partial class MyceliumSystem : Node2D
 		// Calculate how many tiles to spread this tick (ramps with network size)
 		int spreadsThisTick = BaseSpreadsPerTick + (TotalMyceliumTiles / RampEveryNTiles);
 		spreadsThisTick = System.Math.Min(spreadsThisTick, MaxSpreadsPerTick);
+
+		// Scale by vigor root spread multiplier
+		if (_tendril != null)
+			spreadsThisTick = (int)(spreadsThisTick * _tendril.RootSpreadMultiplier);
+
 		spreadsThisTick = System.Math.Min(spreadsThisTick, _frontier.Count);
 
 		for (int i = 0; i < spreadsThisTick; i++)

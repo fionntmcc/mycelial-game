@@ -65,3 +65,29 @@ What I'd build in the next 2 weeks, in order:
 First, get 2-3 basic enemy types working on the sub-grid — something small and passive (grubs), something that flees (centipedes), and something aggressive that charges you (a burrowing beetle). Just movement AI and collision with your tendril. Second, make the harpoon kill/consume them with a satisfying effect. Third, add one upgrade that changes how you play when you consume enough of something. Fourth, add one enemy that can actually kill you, and a death/restart flow. That gives you a complete loop: explore, find creatures, hunt them, grow stronger, encounter something dangerous, survive or die, try again.
 That's your Steam Next Fest demo in miniature. Everything else — biomes, humans, deeper upgrades, infection strategy — layers on top of that loop once it's proven.
 Want me to help you design the enemy AI system or the upgrade/mutation architecture in detail?
+
+
+
+# HUNGER REDESIGN
+
+This is the right problem to solve now — the hunger system is the core loop and if it doesn't feel good, nothing built on top of it will either. Let me think through this properly.
+The fundamental issue with the current hunger system is that movement costs resources. That means the most fun thing in your game (moving around) is the thing that punishes you. That's backwards. The game should punish not moving.
+Here's a proposal that I think fits your snake.io-like tendril, your fast-paced goals, and the "connected to the network" concept:
+Replace hunger with two systems: Vitality and Vigor.
+Vitality is your health. It doesn't drain from movement at all. It only drops when enemies hit you or when you're severed from your network. It regens slowly when you're on your own territory. This is the "am I alive" meter — simple, legible, not annoying.
+Vigor is the combo meter. It's the entire game feel. Vigor builds when you consume creatures, claim new tiles, and infect terrain. It decays passively over time. High vigor makes you faster, your blob bigger, your harpoon stronger, your roots spread further. Low vigor makes you sluggish and small. Zero vigor doesn't kill you — but you're a tiny, slow, vulnerable worm barely able to defend yourself.
+The magic is that vigor makes the game feel different moment to moment. At high vigor you're an aggressive predator tearing through the soil. At low vigor you're a desperate parasite scrambling for scraps. Same player, same controls, totally different vibe. And the way to stay powerful is to keep hunting — which keeps pushing you into danger.
+The network connection is where it gets interesting. Your spline trail is your nervous system. As long as your head can trace a path back through your sub-grid cells to the origin tree, you're connected. Connected = vitality regens on your territory, vigor decay is normal. Disconnected = vitality drains fast (like a countdown), vigor plummets, you're on borrowed time. Reconnect or die.
+This makes grazers genuinely terrifying without them dealing direct damage — they eat your trail, and if they chew through the right spot, you're suddenly disconnected and bleeding out. The cave spider is scary because it hits hard. The fungus gnat is scary because it quietly severs your lifeline while you're not looking. Different kinds of threats, both meaningful.
+What counts as "connected" — this is the key design question you raised. Here's the non-arbitrary answer: your sub-grid trail cells form a graph. If any Trail or Root cell adjacent to your head blob can trace a path through other Trail/Root cells back to any cell within the origin tree's tiles, you're connected. You don't need to check this every frame — check it every second or so, or whenever a grazer eats a cell. It's a flood fill from the head through your claimed cells. If it reaches the tree, you're connected.
+The snake.io parallel is exact: your trail IS your body. If something cuts through the middle, the disconnected half dies and becomes available territory for enemies. The head survives on a timer (disconnected vitality drain) and you're racing to either reconnect or reach the tree by a different path.
+Here's what the moment-to-moment gameplay looks like with this system:
+
+You push out from the tree, consuming grubs and beetles. Vigor climbs. You're moving fast, blob is big, feeling powerful.
+You stop to explore a cave. No creatures to eat. Vigor decays. You feel yourself slowing down. Tension builds.
+A cave spider attacks. Your vitality drops. You fight it off with the harpoon, slam it into a wall. Consume it — vigor spikes back up.
+Meanwhile a fungus gnat has been quietly eating your trail behind you. You don't notice.
+The gnat chews through a narrow point. Suddenly "DISCONNECTED" — vitality starts plummeting. Your screen darkens at the edges. You can see on the fog of war where the break is.
+You have maybe 10-15 seconds. Do you race back to seal the break? Or push forward to the tree by a different route? Or kill the gnat and hope there's enough trail left to reconnect?
+
+That's a game. That's the tension. And none of it comes from "you moved 10 tiles so subtract 8 hunger."

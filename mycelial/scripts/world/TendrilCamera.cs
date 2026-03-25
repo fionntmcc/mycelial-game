@@ -114,7 +114,7 @@ public partial class TendrilCamera : Camera2D
 
 		if (_tendril != null)
 		{
-			_targetPosition = _tendril.GetHeadPixelPositionSmooth();
+			_targetPosition = _tendril.GetFocusPosition();
 			GlobalPosition = _targetPosition;
 		}
 	}
@@ -128,7 +128,7 @@ public partial class TendrilCamera : Camera2D
 		// =====================================================================
 		//  BASE TARGET — tendril head pixel position
 		// =====================================================================
-		_targetPosition = _tendril.GetHeadPixelPositionSmooth();
+		_targetPosition = _tendril.GetFocusPosition();
 
 		// =====================================================================
 		//  LOOK-AHEAD — lead the camera in the movement direction
