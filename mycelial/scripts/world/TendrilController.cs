@@ -44,19 +44,6 @@ public partial class TendrilController : Node2D
 	[Export] public float BlockedMomentumDamping = 0.45f;
 	[Export] public int MaxSubStepsPerFrame = 8;
 
-	// --- Root Spread Config ---
-	[Export] public bool EnableRootSpread = true;
-	[Export] public float RootSpreadInterval = 0.9f;
-	[Export] public int RootGrowthStepsPerTick = 3;
-	[Export] public int RootSpawnEveryTiles = 15;
-	[Export] public int RootSpawnIntervalJitter = 2;
-	[Export] public int RootSpawnBurstMin = 2;
-	[Export] public int RootSpawnBurstMax = 4;
-	[Export] public float RootBranchChance = 0.18f;
-	[Export] public int MaxActiveRoots = 20;
-	[Export] public int RootMinLength = 8;
-	[Export] public int RootMaxLength = 22;
-
 	// --- Sub-Grid Blob Config ---
 	/// <summary>Base radius of the organic head blob in sub-cells.</summary>
 	[Export] public int BlobBaseRadius = 5;
@@ -126,31 +113,6 @@ public partial class TendrilController : Node2D
 	public Vector2 CollisionImpulse { get; private set; }
 
 	// =========================================================================
-	//  ROOT TIP GROWTH (same structures as before — operates on terrain tiles)
-	// =========================================================================
-
-	// Root sprout offsets — in sub-grid coordinates, relative to head.
-	// These are the original terrain-tile offsets × SubGridScale (4).
-	private const int _S = WorldConfig.SubGridScale; // 4
-	private static readonly (int dx, int dy)[] RootSpawnOffsets = new[]
-	{
-		(-_S, 0),       (-_S, _S),       (-_S, 2 * _S),
-		(3 * _S, 0),    (3 * _S, _S),    (3 * _S, 2 * _S),
-		(0, 3 * _S),    (_S, 3 * _S),    (2 * _S, 3 * _S),
-	};
-
-	private struct RootTip
-	{
-		public int X;
-		public int Y;
-		public int DirX;
-		public int DirY;
-		public int Length;
-		public int MaxLength;
-		public int StuckSteps;
-	}
-
-	// =========================================================================
 	//  STATE
 	// =========================================================================
 
@@ -199,6 +161,9 @@ public partial class TendrilController : Node2D
 	/// <summary>The vitality/vigor component. Found automatically as a child node.</summary>
 	public TendrilVitality Vitals { get; private set; }
 
+	/// <summary>The root spread component. Found automatically as a child node.</summary>
+	public TendrilRoots Roots { get; private set; }
+
 	// --- Delegation properties so external code can still read off the controller ---
 	public float Vitality => Vitals.Vitality;
 	public float MaxVitality => Vitals.MaxVitality;
@@ -246,13 +211,9 @@ public partial class TendrilController : Node2D
 	private Vector2 _momentum = Vector2.Zero;
 	private float _retreatTimer;
 	private float _regenTimer;
-	private float _rootSpreadTimer;
-	private int _tilesSinceLastRootSpawn;
-	private int _nextRootSpawnDistance;
 	private List<(int X, int Y)> _rootTips;
 	private int _currentRootTipIdx;
 	private Vector2 _lastMoveDir = new Vector2(0, 1); // Continuous direction (not grid-locked)
-	private readonly List<RootTip> _activeRootTips = new();
 	private readonly System.Random _rng = new();
 
 	// Blob animation
@@ -320,6 +281,14 @@ public partial class TendrilController : Node2D
 		}
 		Vitals.VitalityDepleted += StartRetreat;
 
+		// Find TendrilRoots child component
+		Roots = GetNode<TendrilRoots>("TendrilRoots");
+		if (Roots == null)
+		{
+			GD.PrintErr("TendrilController: Missing TendrilRoots child node!");
+			return;
+		}
+
 		// Initialize blob noise for organic head shape
 		_blobNoise = new FastNoiseLite();
 		_blobNoise.NoiseType = FastNoiseLite.NoiseTypeEnum.Simplex;
@@ -347,6 +316,7 @@ public partial class TendrilController : Node2D
 		}
 
 		RegisterTreeTiles();
+		Roots.Initialize(_chunkManager, SubGrid, _claimedTiles, _treeTiles, _rng);
 		_currentRootTipIdx = 0;
 		SpawnAtRootTip(_currentRootTipIdx);
 		GD.Print($"Tendril spawned at sub-grid ({_subHeadX}, {_subHeadY}), " +
@@ -370,13 +340,10 @@ public partial class TendrilController : Node2D
 		IsRegenerating = false;
 		_subTrail.Clear();
 		_currentCoreCells.Clear();
-		_activeRootTips.Clear();
-		_rootSpreadTimer = 0f;
-		_tilesSinceLastRootSpawn = 0;
+		Roots.Reset();
 		_trailAgeCounter = 0;
 		_subStepsSinceTrailRecord = 0;
 		SubGrid.Clear();
-		ScheduleNextRootSpawnDistance();
 
 		// Place initial blob and claim the starting terrain tile
 		PlaceBlob();
@@ -443,7 +410,7 @@ public partial class TendrilController : Node2D
 			ProcessMovement(dt);
 		}
 		
-		ProcessRootSpread(dt);
+		Roots.Process(dt);
 
 		// Age fresh trail cells into settled trail
 		SubGrid.AgeFreshCells(_trailAgeCounter, 30);
@@ -658,7 +625,7 @@ public partial class TendrilController : Node2D
 
 
 			// Track distance for root spawning
-			TrackTravelAndSpawnRoots();
+			Roots.OnTerrainTileEntered(_subHeadX, _subHeadY, _lastMoveDir);
 
 			} // end normal (non-dash) branch
 		}
@@ -838,221 +805,6 @@ public partial class TendrilController : Node2D
 		_currentRootTipIdx = (_currentRootTipIdx + 1) % _rootTips.Count;
 		SpawnAtRootTip(_currentRootTipIdx);
 		GD.Print($"Tendril regenerated at root tip {_currentRootTipIdx}!");
-	}
-
-	// =========================================================================
-	//  ROOT SPREAD — still operates on terrain tiles
-	// =========================================================================
-
-	private void TrackTravelAndSpawnRoots()
-	{
-		if (!EnableRootSpread) return;
-		if (_lastMoveDir.Y <= 0) return;
-
-		_tilesSinceLastRootSpawn++;
-		if (_tilesSinceLastRootSpawn < _nextRootSpawnDistance) return;
-
-		SpawnRootBurst();
-		_tilesSinceLastRootSpawn = 0;
-		ScheduleNextRootSpawnDistance();
-	}
-
-	private void ScheduleNextRootSpawnDistance()
-	{
-		int jitter = System.Math.Max(0, RootSpawnIntervalJitter);
-		int minDistance = System.Math.Max(1, RootSpawnEveryTiles - jitter);
-		int maxDistance = System.Math.Max(minDistance, RootSpawnEveryTiles + jitter);
-		_nextRootSpawnDistance = _rng.Next(minDistance, maxDistance + 1);
-	}
-
-	private void SpawnRootBurst()
-	{
-		if (_activeRootTips.Count >= MaxActiveRoots) return;
-
-		int burstMin = System.Math.Max(1, RootSpawnBurstMin);
-		int burstMax = System.Math.Max(burstMin, RootSpawnBurstMax);
-		int desiredCount = _rng.Next(burstMin, burstMax + 1);
-		int available = MaxActiveRoots - _activeRootTips.Count;
-		int spawnCount = System.Math.Min(desiredCount, available);
-		if (spawnCount <= 0) return;
-
-		int spawned = 0;
-		int attempts = 0;
-		int maxAttempts = spawnCount * 6;
-
-		while (spawned < spawnCount && attempts < maxAttempts)
-		{
-			attempts++;
-			if (TrySpawnSingleRootTip())
-				spawned++;
-		}
-	}
-
-	private bool TrySpawnSingleRootTip()
-	{
-		if (_activeRootTips.Count >= MaxActiveRoots) return false;
-
-		var offset = RootSpawnOffsets[_rng.Next(RootSpawnOffsets.Length)];
-		int startX = _subHeadX + offset.dx;
-		int startY = _subHeadY + offset.dy;
-
-		int dirX = offset.dx < 0 ? -1 : (offset.dx > 2 * _S ? 1 : (_rng.Next(3) - 1));
-		int dirY = 1;
-
-		if (!TrySpreadRootInto(startX, startY)) return false;
-
-		// Root lengths are in sub-grid steps (4× longer than terrain-tile lengths)
-		int maxLength = RootMinLength * WorldConfig.SubGridScale;
-		int range = (RootMaxLength - RootMinLength) * WorldConfig.SubGridScale;
-		if (range > 0)
-			maxLength += _rng.Next(range + 1);
-
-		_activeRootTips.Add(new RootTip
-		{
-			X = startX,
-			Y = startY,
-			DirX = dirX,
-			DirY = dirY,
-			Length = 1,
-			MaxLength = maxLength,
-			StuckSteps = 0,
-		});
-
-		return true;
-	}
-
-	private void ProcessRootSpread(float dt)
-	{
-		if (!EnableRootSpread || _activeRootTips.Count == 0) return;
-
-		_rootSpreadTimer += dt;
-		if (_rootSpreadTimer < RootSpreadInterval) return;
-		_rootSpreadTimer -= RootSpreadInterval;
-
-		int steps = System.Math.Max(1, RootGrowthStepsPerTick);
-		for (int i = 0; i < steps; i++)
-		{
-			if (_activeRootTips.Count == 0) break;
-			GrowOneRootTipStep();
-		}
-	}
-
-	private void GrowOneRootTipStep()
-	{
-		if (_activeRootTips.Count == 0) return;
-
-		int idx = _rng.Next(_activeRootTips.Count);
-		var tip = _activeRootTips[idx];
-
-		if (tip.Length >= tip.MaxLength || tip.StuckSteps >= 3)
-		{
-			_activeRootTips.RemoveAt(idx);
-			return;
-		}
-
-		var (nextDirX, nextDirY) = ChooseNextRootDirection(tip);
-		int nextX = tip.X + nextDirX;
-		int nextY = tip.Y + nextDirY;
-
-		if (TrySpreadRootInto(nextX, nextY))
-		{
-			tip.X = nextX;
-			tip.Y = nextY;
-			tip.DirX = nextDirX;
-			tip.DirY = nextDirY;
-			tip.Length++;
-			tip.StuckSteps = 0;
-			_activeRootTips[idx] = tip;
-			TryBranchRootTip(tip);
-			return;
-		}
-
-		tip.StuckSteps++;
-		tip.Length++;
-		tip.DirX = _rng.Next(3) - 1;
-		tip.DirY = 1;
-
-		if (tip.Length >= tip.MaxLength || tip.StuckSteps >= 3)
-			_activeRootTips.RemoveAt(idx);
-		else
-			_activeRootTips[idx] = tip;
-	}
-
-	private (int dirX, int dirY) ChooseNextRootDirection(RootTip tip)
-	{
-		int dirX = tip.DirX;
-
-		if (_rng.NextDouble() < 0.35f)
-			dirX += _rng.Next(3) - 1;
-
-		if (dirX < -1) dirX = -1;
-		if (dirX > 1) dirX = 1;
-
-		if (dirX == 0 && _rng.NextDouble() < 0.25f)
-			dirX = _rng.Next(2) == 0 ? -1 : 1;
-
-		return (dirX, 1);
-	}
-
-	private void TryBranchRootTip(RootTip parent)
-	{
-		if (_activeRootTips.Count >= MaxActiveRoots) return;
-		if (_rng.NextDouble() > RootBranchChance) return;
-
-		int branchDirX = parent.DirX == 0
-			? (_rng.Next(2) == 0 ? -1 : 1)
-			: -parent.DirX;
-
-		int branchX = parent.X + branchDirX;
-		int branchY = parent.Y + 1;
-
-		if (!TrySpreadRootInto(branchX, branchY)) return;
-
-		int branchMaxLength = RootMinLength * WorldConfig.SubGridScale;
-		int range = (RootMaxLength - RootMinLength) * WorldConfig.SubGridScale;
-		if (range > 0)
-			branchMaxLength += _rng.Next(range + 1);
-
-		_activeRootTips.Add(new RootTip
-		{
-			X = branchX,
-			Y = branchY,
-			DirX = branchDirX,
-			DirY = 1,
-			Length = 1,
-			MaxLength = branchMaxLength,
-			StuckSteps = 0,
-		});
-	}
-
-	/// <summary>
-	/// Try to grow a root into a sub-grid position.
-	/// Checks terrain passability, then places a Root cell on the sub-grid.
-	/// Does NOT modify terrain tiles.
-	/// </summary>
-	private bool TrySpreadRootInto(int subX, int subY)
-	{
-		// Already occupied on the sub-grid
-		if (SubGrid.HasCell(subX, subY)) return false;
-
-		// Check terrain passability at this position
-		var (terrainX, terrainY) = SubGridData.SubToTerrain(subX, subY);
-		long terrainKey = PackCoords(terrainX, terrainY);
-		if (_treeTiles.Contains(terrainKey)) return false;
-
-		TileType tile = _chunkManager.GetTileAt(terrainX, terrainY);
-		if (TileProperties.Is(tile, TileFlags.Liquid)) return false;
-		if (tile == TileType.Air) return false;
-		if (TileProperties.Is(tile, TileFlags.Solid) && !TileProperties.Is(tile, TileFlags.Breakable))
-			return false;
-
-		// Place root cell on sub-grid
-		byte intensity = (byte)(180 + _rng.Next(76)); // Slight variation
-		SubGrid.SetCell(subX, subY, SubCellState.Root, 0, intensity);
-
-		// Track territory on terrain grid for gameplay
-		_claimedTiles.Add(terrainKey);
-		return true;
 	}
 
 	// =========================================================================

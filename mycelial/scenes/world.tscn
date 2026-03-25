@@ -14,7 +14,8 @@
 [ext_resource type="Script" uid="uid://eti3psjumq4a" path="res://scripts/world/TendrilHarpoon.cs" id="12_q5onr"]
 [ext_resource type="Script" uid="uid://csfalpa7uatxs" path="res://scripts/world/CreatureRenderer.cs" id="13_jhx03"]
 [ext_resource type="Script" uid="uid://deo38j4v7kps3" path="res://scripts/world/CreatureParticles.cs" id="14_o8fc1"]
-[ext_resource type="Script" path="res://scripts/world/TendrilVitality.cs" id="15_vital"]
+[ext_resource type="Script" uid="uid://dq7jbypohc681" path="res://scripts/world/TendrilVitality.cs" id="15_vital"]
+[ext_resource type="Script" uid="uid://b5w727wta8t42" path="res://scripts/world/TendrilRoots.cs" id="16_roots"]
 
 [node name="World" type="Node2D" unique_id=185312821]
 
@@ -44,7 +45,6 @@ MoveDelay = 0.09
 MomentumAcceleration = 15.0
 MomentumDrag = 5.0
 MinMoveDelayMultiplier = 0.35
-RootSpawnIntervalJitter = -217
 BlobBaseRadius = 1
 BlobNoiseAmplitude = 3.0
 BlobNoiseFrequency = 3.0
@@ -52,11 +52,17 @@ BlobStretchFactor = 0.3
 CreatureManagerPath = NodePath("../CreatureManager")
 HarpoonPath = NodePath("../TendrilHarpoon")
 
-[node name="TendrilVitality" type="Node" parent="TendrilController"]
+[node name="TendrilVitality" type="Node" parent="TendrilController" unique_id=529137020]
 script = ExtResource("15_vital")
 DisconnectVitalityDrain = 0.0
 DisconnectDrainEscalation = 0.0
 VigorDecayRate = 3.0
+
+[node name="TendrilRoots" type="Node" parent="TendrilController" unique_id=1272205822]
+script = ExtResource("16_roots")
+RootSpreadInterval = 0.5
+RootGrowthStepsPerTick = 6
+RootSpawnIntervalJitter = -217
 
 [node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
 script = ExtResource("7_4mrxx")
