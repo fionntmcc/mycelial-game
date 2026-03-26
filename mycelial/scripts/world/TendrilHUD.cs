@@ -47,12 +47,30 @@ public partial class TendrilHUD : CanvasLayer
 
         CreateUI();
 
-        // Connect signals — vitality/vigor/connection come from the TendrilVitality component
+        // Defer signal connections — TendrilController._Ready() hasn't run yet
+        // (HUD appears before TendrilController in the scene tree), so Vitals
+        // is null at this point. CallDeferred waits until the current frame's
+        // _Ready() chain completes.
+        CallDeferred(nameof(ConnectSignals));
+    }
+
+    private void ConnectSignals()
+    {
+        if (_tendril.Vitals == null)
+        {
+            GD.PrintErr("TendrilHUD: TendrilVitality not found on controller!");
+            return;
+        }
+
         _tendril.Vitals.VitalityChanged += OnVitalityChanged;
         _tendril.Vitals.VigorChanged += OnVigorChanged;
         _tendril.Vitals.ConnectionChanged += OnConnectionChanged;
         _tendril.RetreatStarted += OnRetreatStarted;
         _tendril.RetreatEnded += OnRetreatEnded;
+
+        // Initial display now that vitals are initialized
+        UpdateVitalityDisplay(_tendril.Vitality, _tendril.MaxVitality);
+        UpdateVigorDisplay(_tendril.Vigor, _tendril.MaxVigor);
     }
 
     private void CreateUI()
@@ -126,11 +144,6 @@ public partial class TendrilHUD : CanvasLayer
         _tileCountLabel.AddThemeColorOverride("font_color", new Color(0.6f, 0.8f, 0.6f));
         _tileCountLabel.AddThemeFontSizeOverride("font_size", 12);
         AddChild(_tileCountLabel);
-
-        // Initial update
-        UpdateVitalityDisplay(_tendril.Vitality, _tendril.MaxVitality);
-        UpdateVigorDisplay(_tendril.Vigor, _tendril.MaxVigor);
-        UpdateStatus("Spreading...");
     }
 
     public override void _Process(double delta)

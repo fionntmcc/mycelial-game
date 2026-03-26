@@ -145,6 +145,8 @@ public partial class TendrilMovement : Node
 		float delayMultiplier = Mathf.Lerp(MaxMoveDelayMultiplier, MinMoveDelayMultiplier, speed);
 		float effectiveMoveDelay = Mathf.Max(0.005f, MoveDelay * delayMultiplier);
 		effectiveMoveDelay /= _controller.SpeedMultiplier;
+		if (_controller.Lunge != null)
+			effectiveMoveDelay /= (1f + _controller.Lunge.CurrentBoost);
 		float stepsPerSecond = 1.0f / effectiveMoveDelay;
 		MoveAccumulator += Momentum * stepsPerSecond * dt;
 

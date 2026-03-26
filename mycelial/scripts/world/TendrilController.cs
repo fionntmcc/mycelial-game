@@ -128,6 +128,9 @@ public partial class TendrilController : Node2D
 	/// <summary>The movement/input/momentum component. Found automatically as a child node.</summary>
 	public TendrilMovement Movement { get; private set; }
 
+	/// <summary>The lunge ability component. Found automatically as a child node.</summary>
+	public TendrilLunge Lunge { get; private set; }
+
 	// --- Delegation properties so external code can still read off the controller ---
 	public float Vitality => Vitals.Vitality;
 	public float MaxVitality => Vitals.MaxVitality;
@@ -151,6 +154,10 @@ public partial class TendrilController : Node2D
 	public bool IsRushHolding => Rush.IsHolding;
 	public bool IsRushDashing => Rush.IsDashing;
 	public bool IsRetractFollowing => Rush.IsRetractFollowing;
+
+	// Lunge state flags — delegated to TendrilLunge
+	public bool IsLunging => Lunge?.IsLunging ?? false;
+	public bool IsLungeCharging => Lunge?.IsCharging ?? false;
 
 	// Trail: sub-grid positions (most recent first) for retreat path.
 	// Only records one entry per terrain tile crossing to keep retreat smooth
@@ -250,6 +257,14 @@ public partial class TendrilController : Node2D
 			return;
 		}
 
+		// Find TendrilLunge child component
+		Lunge = GetNode<TendrilLunge>("TendrilLunge");
+		if (Lunge == null)
+		{
+			GD.PrintErr("TendrilController: Missing TendrilLunge child node!");
+			return;
+		}
+
 		// Initialize blob noise for organic head shape
 		_blobNoise = new FastNoiseLite();
 		_blobNoise.NoiseType = FastNoiseLite.NoiseTypeEnum.Simplex;
@@ -280,6 +295,7 @@ public partial class TendrilController : Node2D
 		Roots.Initialize(_chunkManager, SubGrid, _claimedTiles, _treeTiles, _rng);
 		Rush.Initialize(this, _harpoon);
 		Movement.Initialize(this, _creatureManager);
+		Lunge.Initialize(this, _harpoon, _creatureManager);
 		_currentRootTipIdx = 0;
 		SpawnAtRootTip(_currentRootTipIdx);
 		GD.Print($"Tendril spawned at sub-grid ({_subHeadX}, {_subHeadY}), " +
@@ -366,6 +382,7 @@ public partial class TendrilController : Node2D
 		else
 		{
 			Movement.Process(dt);
+			Lunge.Process(dt);
 		}
 		
 		Roots.Process(dt);
