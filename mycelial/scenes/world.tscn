@@ -17,6 +17,7 @@
 [ext_resource type="Script" uid="uid://dq7jbypohc681" path="res://scripts/world/TendrilVitality.cs" id="15_vital"]
 [ext_resource type="Script" uid="uid://b5w727wta8t42" path="res://scripts/world/TendrilRoots.cs" id="16_roots"]
 [ext_resource type="Script" path="res://scripts/world/TendrilRush.cs" id="17_rush1"]
+[ext_resource type="Script" uid="uid://vqqzgmowczqum" path="res://scripts/world/TendrilMovement.cs" id="18_move1"]
 
 [node name="World" type="Node2D" unique_id=185312821]
 
@@ -42,10 +43,6 @@ ChunkManagerPath = NodePath("../ChunkManager")
 [node name="TendrilController" type="Node2D" parent="." unique_id=1420415883]
 script = ExtResource("5_qfnet")
 ChunkManagerPath = NodePath("../ChunkManager")
-MoveDelay = 0.09
-MomentumAcceleration = 15.0
-MomentumDrag = 5.0
-MinMoveDelayMultiplier = 0.35
 BlobBaseRadius = 1
 BlobNoiseAmplitude = 3.0
 BlobNoiseFrequency = 3.0
@@ -67,6 +64,13 @@ RootSpawnIntervalJitter = -217
 
 [node name="TendrilRush" type="Node" parent="TendrilController" unique_id=1848544129]
 script = ExtResource("17_rush1")
+
+[node name="TendrilMovement" type="Node" parent="TendrilController"]
+script = ExtResource("18_move1")
+MoveDelay = 0.09
+MomentumAcceleration = 15.0
+MomentumDrag = 5.0
+MinMoveDelayMultiplier = 0.35
 
 [node name="PassiveCorruption" type="Node2D" parent="." unique_id=1657806901]
 script = ExtResource("7_4mrxx")

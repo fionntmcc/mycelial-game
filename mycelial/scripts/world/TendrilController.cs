@@ -29,20 +29,8 @@ public partial class TendrilController : Node2D
 	// --- Connection Config ---
 	[Export] public int ConnectionBfsMaxNodes = 5000;
 
-	// --- Movement Config ---
-	[Export] public float MoveDelay = 0.08f;
+	// --- Movement / Retreat ---
 	[Export] public float RetreatSpeed = 0.03f;
-	[Export] public float MomentumAcceleration = 8.0f;
-	[Export] public float MomentumSteering = 14.0f;
-	[Export] public float MomentumTurnAroundBrake = 10.0f;
-	[Export] public float MomentumReverseLockThreshold = -0.55f;
-	[Export] public float MomentumDrag = 3.2f;
-	[Export] public float MomentumDeadZone = 0.08f;
-	[Export] public float ControllerDeadZone = 0.22f;
-	[Export] public float MinMoveDelayMultiplier = 0.58f;
-	[Export] public float MaxMoveDelayMultiplier = 1.0f;
-	[Export] public float BlockedMomentumDamping = 0.45f;
-	[Export] public int MaxSubStepsPerFrame = 8;
 
 	// --- Sub-Grid Blob Config ---
 	/// <summary>Base radius of the organic head blob in sub-cells.</summary>
@@ -60,24 +48,17 @@ public partial class TendrilController : Node2D
 	/// <summary>Speed of the blob shape animation (makes it pulse/shift).</summary>
 	[Export] public float BlobAnimSpeed = 1.8f;
 
-	// --- Creature Auto-Steer ---
 	/// <summary>Path to CreatureManager node (for auto-steering toward nearby prey).</summary>
 	[Export] public NodePath CreatureManagerPath { get; set; }
-
-	/// <summary>Radius in terrain tiles to scan for creatures to steer toward.</summary>
-	[Export] public int CreatureSteerRadius = 6;
-
-	/// <summary>How strongly the tendril steers toward nearby creatures (0–1).</summary>
-	[Export] public float CreatureSteerStrength = 0.15f;
 	
 	/// <summary>Path to TendrilHarpoon node (freezes movement while harpoon is active).</summary>
 	[Export] public NodePath HarpoonPath { get; set; }
 	
 	/// <summary>Current movement direction for external systems (fog cone, harpoon, etc).</summary>
-	public Vector2 LastMoveDirection => _lastMoveDir;
+	public Vector2 LastMoveDirection => Movement.LastMoveDir;
 
 	/// <summary>Current movement speed (0–1) for camera shake scaling.</summary>
-	public float CurrentSpeed => Mathf.Clamp(_momentum.Length(), 0f, 1f);
+	public float CurrentSpeed => Movement.CurrentSpeed;
 
 	/// <summary>Current harpoon instance for render/UI systems.</summary>
 	public TendrilHarpoon Harpoon => _harpoon;
@@ -87,7 +68,7 @@ public partial class TendrilController : Node2D
 	/// points in the direction of the blocked movement. Magnitude = impact force.
 	/// Decays to zero each frame — the camera reads and consumes it.
 	/// </summary>
-	public Vector2 CollisionImpulse { get; private set; }
+	public Vector2 CollisionImpulse { get; set; }
 
 	// =========================================================================
 	//  STATE
@@ -130,8 +111,8 @@ public partial class TendrilController : Node2D
 	{
 		int cellSize = WorldConfig.SubCellSize;
 		return new Vector2(
-			(_subHeadX + _moveAccumulator.X) * cellSize + cellSize / 2f,
-			(_subHeadY + _moveAccumulator.Y) * cellSize + cellSize / 2f
+			(_subHeadX + Movement.MoveAccumulator.X) * cellSize + cellSize / 2f,
+			(_subHeadY + Movement.MoveAccumulator.Y) * cellSize + cellSize / 2f
 		);
 	}
 
@@ -143,6 +124,9 @@ public partial class TendrilController : Node2D
 
 	/// <summary>The rush state machine component. Found automatically as a child node.</summary>
 	public TendrilRush Rush { get; private set; }
+
+	/// <summary>The movement/input/momentum component. Found automatically as a child node.</summary>
+	public TendrilMovement Movement { get; private set; }
 
 	// --- Delegation properties so external code can still read off the controller ---
 	public float Vitality => Vitals.Vitality;
@@ -183,14 +167,11 @@ public partial class TendrilController : Node2D
 	private readonly HashSet<long> _claimedTiles = new();
 	private readonly HashSet<long> _treeTiles = new();
 
-	// Movement state
-	private Vector2 _moveAccumulator = Vector2.Zero;
-	private Vector2 _momentum = Vector2.Zero;
+	// Retreat / regen state
 	private float _retreatTimer;
 	private float _regenTimer;
 	private List<(int X, int Y)> _rootTips;
 	private int _currentRootTipIdx;
-	private Vector2 _lastMoveDir = new Vector2(0, 1); // Continuous direction (not grid-locked)
 	private readonly System.Random _rng = new();
 
 	// Blob animation
@@ -198,9 +179,7 @@ public partial class TendrilController : Node2D
 	private float _blobAnimTime;
 	private ushort _trailAgeCounter;
 
-	// Creature auto-steering
 	private CreatureManager _creatureManager;
-	
 	private TendrilHarpoon _harpoon;
 
 	// Track which terrain tile we last entered (to trigger gameplay effects once per tile)
@@ -263,6 +242,14 @@ public partial class TendrilController : Node2D
 			return;
 		}
 
+		// Find TendrilMovement child component
+		Movement = GetNode<TendrilMovement>("TendrilMovement");
+		if (Movement == null)
+		{
+			GD.PrintErr("TendrilController: Missing TendrilMovement child node!");
+			return;
+		}
+
 		// Initialize blob noise for organic head shape
 		_blobNoise = new FastNoiseLite();
 		_blobNoise.NoiseType = FastNoiseLite.NoiseTypeEnum.Simplex;
@@ -292,6 +279,7 @@ public partial class TendrilController : Node2D
 		RegisterTreeTiles();
 		Roots.Initialize(_chunkManager, SubGrid, _claimedTiles, _treeTiles, _rng);
 		Rush.Initialize(this, _harpoon);
+		Movement.Initialize(this, _creatureManager);
 		_currentRootTipIdx = 0;
 		SpawnAtRootTip(_currentRootTipIdx);
 		GD.Print($"Tendril spawned at sub-grid ({_subHeadX}, {_subHeadY}), " +
@@ -364,23 +352,20 @@ public partial class TendrilController : Node2D
 		}
 		else if (IsRushHolding)
 		{
-			_momentum = Vector2.Zero;
-			_moveAccumulator = Vector2.Zero;
+			Movement.ClearMomentum();
 		}
 		else if (IsRetractFollowing)
 		{
-			_momentum = Vector2.Zero;
-			_moveAccumulator = Vector2.Zero;
+			Movement.ClearMomentum();
 		}
 		else if (_harpoon != null && _harpoon.IsActive)
 		{
 			// Freeze: kill momentum so it doesn't resume after retract
-			_momentum = Vector2.Zero;
-			_moveAccumulator = Vector2.Zero;
+			Movement.ClearMomentum();
 		}
 		else
 		{
-			ProcessMovement(dt);
+			Movement.Process(dt);
 		}
 		
 		Roots.Process(dt);
@@ -390,151 +375,8 @@ public partial class TendrilController : Node2D
 	}
 
 	// =========================================================================
-	//  MOVEMENT — operates on sub-grid coordinates
+	//  SUB-GRID MOVEMENT — TrySubMove
 	// =========================================================================
-
-	private void ProcessMovement(float dt)
-	{
-		Vector2 input = GetMovementInputVector();
-
-		if (input != Vector2.Zero)
-		{
-			Vector2 inputDir = input.Normalized();
-
-			if (_momentum == Vector2.Zero)
-			{
-				_momentum = _momentum.MoveToward(input, MomentumAcceleration * dt);
-			}
-			else
-			{
-				Vector2 momentumDir = _momentum.Normalized();
-				float alignment = momentumDir.Dot(inputDir);
-
-				if (alignment <= MomentumReverseLockThreshold)
-				{
-					// Heavy brake before reversing direction
-					_momentum = _momentum.MoveToward(Vector2.Zero, MomentumTurnAroundBrake * dt);
-
-					if (_momentum.Length() <= MomentumDeadZone * 1.25f)
-						_momentum = _momentum.MoveToward(input, MomentumAcceleration * dt);
-				}
-				else
-				{
-					float fromAngle = Mathf.Atan2(momentumDir.Y, momentumDir.X);
-					float toAngle = Mathf.Atan2(inputDir.Y, inputDir.X);
-					float steerT = Mathf.Clamp(MomentumSteering * dt, 0f, 1f);
-					float steeredAngle = Mathf.LerpAngle(fromAngle, toAngle, steerT);
-					Vector2 steeredDir = new Vector2(Mathf.Cos(steeredAngle), Mathf.Sin(steeredAngle));
-
-					float targetMagnitude = input.Length();
-					float nextMagnitude = Mathf.MoveToward(_momentum.Length(), targetMagnitude, MomentumAcceleration * dt);
-					_momentum = steeredDir * nextMagnitude;
-				}
-			}
-		}
-		else
-		{
-			_momentum = _momentum.MoveToward(Vector2.Zero, MomentumDrag * dt);
-		}
-
-		// --- Creature Auto-Steer (sub-grid precision) ---
-		// Subtly nudge momentum toward nearby creatures (prey attraction).
-		if (_creatureManager != null && _momentum.Length() > MomentumDeadZone && CreatureSteerStrength > 0f)
-		{
-			int steerRadiusSub = CreatureSteerRadius * WorldConfig.SubGridScale;
-			var nearest = _creatureManager.GetNearestCreatureSubPosition(_subHeadX, _subHeadY, steerRadiusSub);
-			if (nearest.HasValue)
-			{
-				// Direction from head to creature — both in sub-grid space, no conversion needed
-				Vector2 creatureSubPos = new Vector2(nearest.Value.SubX, nearest.Value.SubY);
-				Vector2 headPos = new Vector2(_subHeadX, _subHeadY);
-				Vector2 toCreature = (creatureSubPos - headPos).Normalized();
-
-				// Blend toward creature direction — subtle so player stays in control
-				float steerAmount = CreatureSteerStrength * _momentum.Length();
-				_momentum += toCreature * steerAmount * dt;
-
-				// Don't let steering increase speed beyond normal range
-				if (_momentum.Length() > 1f)
-					_momentum = _momentum.Normalized() * 1f;
-			}
-		}
-
-		float speed = Mathf.Clamp(_momentum.Length(), 0f, 1f);
-		if (speed <= MomentumDeadZone)
-		{
-			if (input == Vector2.Zero)
-				_moveAccumulator = Vector2.Zero;
-			return;
-		}
-
-		// Update continuous direction for blob stretching
-		if (_momentum.Length() > MomentumDeadZone)
-			_lastMoveDir = _momentum.Normalized();
-
-		float delayMultiplier = Mathf.Lerp(MaxMoveDelayMultiplier, MinMoveDelayMultiplier, speed);
-		// Guard against misconfiguration. Floor is much lower than the terrain-grid
-		// version because sub-steps are 4× smaller, so we need 4× more of them.
-		float effectiveMoveDelay = Mathf.Max(0.005f, MoveDelay * delayMultiplier);
-		effectiveMoveDelay /= SpeedMultiplier; // Vigor makes you faster
-		float stepsPerSecond = 1.0f / effectiveMoveDelay;
-		_moveAccumulator += _momentum * stepsPerSecond * dt;
-
-		// Each step is one sub-cell (4px), so we move more frequently than before.
-		// Allow more iterations per frame since sub-steps are smaller.
-		int iterations = 0;
-		while ((Mathf.Abs(_moveAccumulator.X) >= 1f || Mathf.Abs(_moveAccumulator.Y) >= 1f) && iterations < MaxSubStepsPerFrame)
-		{
-			iterations++;
-
-			int stepX = Mathf.Abs(_moveAccumulator.X) >= 1f ? System.Math.Sign(_moveAccumulator.X) : 0;
-			int stepY = Mathf.Abs(_moveAccumulator.Y) >= 1f ? System.Math.Sign(_moveAccumulator.Y) : 0;
-
-			bool moved = false;
-
-			// Try diagonal first
-			if (stepX != 0 || stepY != 0)
-			{
-				moved = TrySubMove(_subHeadX + stepX, _subHeadY + stepY);
-				if (moved)
-				{
-					if (stepX != 0) _moveAccumulator.X -= stepX;
-					if (stepY != 0) _moveAccumulator.Y -= stepY;
-					continue;
-				}
-			}
-
-			// Axis-separated fallback for wall glancing
-			if (stepX != 0)
-			{
-				moved = TrySubMove(_subHeadX + stepX, _subHeadY);
-				if (moved)
-				{
-					_moveAccumulator.X -= stepX;
-					continue;
-				}
-			}
-
-			if (stepY != 0)
-			{
-				moved = TrySubMove(_subHeadX, _subHeadY + stepY);
-				if (moved)
-				{
-					_moveAccumulator.Y -= stepY;
-					continue;
-				}
-			}
-
-			// Fully blocked — record collision for camera shake
-			Vector2 blockedDir = new Vector2(stepX, stepY).Normalized();
-			float impactForce = _momentum.Length();
-			CollisionImpulse = blockedDir * impactForce;
-
-			_moveAccumulator *= 0.35f;
-			_momentum *= BlockedMomentumDamping;
-			break;
-		}
-	}
 
 	/// <summary>
 	/// Attempt to move the head one sub-cell step to a new position.
@@ -598,7 +440,7 @@ public partial class TendrilController : Node2D
 
 
 			// Track distance for root spawning
-			Roots.OnTerrainTileEntered(_subHeadX, _subHeadY, _lastMoveDir);
+			Roots.OnTerrainTileEntered(_subHeadX, _subHeadY, Movement.LastMoveDir);
 
 			} // end normal (non-dash) branch
 		}
@@ -668,7 +510,7 @@ public partial class TendrilController : Node2D
 				float edgeRadius = radius + noiseVal * BlobNoiseAmplitude;
 
 				// Stretch in movement direction
-				float moveDot = dx * _lastMoveDir.X + dy * _lastMoveDir.Y;
+				float moveDot = dx * Movement.LastMoveDir.X + dy * Movement.LastMoveDir.Y;
 				if (moveDot > 0)
 					edgeRadius += moveDot * BlobStretchFactor;
 
@@ -781,58 +623,6 @@ public partial class TendrilController : Node2D
 	}
 
 	// =========================================================================
-	//  INPUT
-	// =========================================================================
-
-	private Vector2 GetMovementInputVector()
-	{
-		int keyX = 0;
-		int keyY = 0;
-
-		if (Input.IsKeyPressed(Key.W) || Input.IsKeyPressed(Key.Up))
-			keyY -= 1;
-		if (Input.IsKeyPressed(Key.S) || Input.IsKeyPressed(Key.Down))
-			keyY += 1;
-		if (Input.IsKeyPressed(Key.A) || Input.IsKeyPressed(Key.Left))
-			keyX -= 1;
-		if (Input.IsKeyPressed(Key.D) || Input.IsKeyPressed(Key.Right))
-			keyX += 1;
-
-		Vector2 keyboard = new Vector2(keyX, keyY);
-		if (keyboard != Vector2.Zero)
-			keyboard = keyboard.Normalized();
-
-		Vector2 stick = Vector2.Zero;
-		var joypads = Input.GetConnectedJoypads();
-		if (joypads.Count > 0)
-		{
-			int joyId = joypads[0];
-			stick = new Vector2(
-				Input.GetJoyAxis(joyId, JoyAxis.LeftX),
-				Input.GetJoyAxis(joyId, JoyAxis.LeftY)
-			);
-
-			float len = stick.Length();
-			if (len < ControllerDeadZone)
-			{
-				stick = Vector2.Zero;
-			}
-			else if (len > 0f)
-			{
-				float normalizedLen = (len - ControllerDeadZone) / (1f - ControllerDeadZone);
-				normalizedLen = Mathf.Clamp(normalizedLen, 0f, 1f);
-				stick = stick.Normalized() * normalizedLen;
-			}
-		}
-
-		Vector2 combined = keyboard + stick;
-		if (combined.Length() > 1f)
-			combined = combined.Normalized();
-
-		return combined;
-	}
-
-	// =========================================================================
 	//  NETWORK CONNECTION CHECK
 	// =========================================================================
 
@@ -921,8 +711,7 @@ public partial class TendrilController : Node2D
 
 		_subTrail.Insert(0, (_subHeadX, _subHeadY));
 		_subStepsSinceTrailRecord = 0;
-		_momentum = Vector2.Zero;
-		_moveAccumulator = Vector2.Zero;
+		Movement.ClearMomentum();
 
 		_trailAgeCounter++;
 		SubGrid.DemoteCoreToFresh(_currentCoreCells, _trailAgeCounter);
@@ -946,8 +735,7 @@ public partial class TendrilController : Node2D
 
 	public void ClearMomentum()
 	{
-		_momentum = Vector2.Zero;
-		_moveAccumulator = Vector2.Zero;
+		Movement.ClearMomentum();
 	}
 
 	public void SetSubHeadDirect(int subX, int subY)
@@ -970,7 +758,7 @@ public partial class TendrilController : Node2D
 
 	public void SetLastMoveDir(Vector2 dir)
 	{
-		_lastMoveDir = dir;
+		Movement.LastMoveDir = dir;
 	}
 
 	// =========================================================================
